@@ -12,33 +12,7 @@ typed into whatever app has focus.
 
 ## Install
 
-Requires [uv](https://docs.astral.sh/uv/) (Python 3.12 is fetched automatically):
-
-```sh
-git clone <this repo> && cd PyWhispr
-uv sync
-uv run pywhispr download   # optional: pre-download the model (~600 MB, one time)
-uv run pywhispr            # start the app
-```
-
-The right speech backend is selected automatically:
-
-| Platform | Backend | Runtime |
-|---|---|---|
-| Apple Silicon Mac | `parakeet-mlx` | MLX (Metal GPU) |
-| PC with NVIDIA GPU | `onnx-asr` | ONNX Runtime, CUDAExecutionProvider |
-| Anything else | `onnx-asr` | ONNX Runtime, CPU |
-
-## Usage
-
-1. Start `uv run pywhispr` — a microphone icon appears in the menu bar / system tray.
-2. Press the hotkey (**⌘⇧Space** on Mac, **Ctrl+Alt+Space** on Windows) to start recording.
-   An overlay with a live waveform appears at the bottom of the screen.
-3. Speak, then press the hotkey again. The text is pasted into the focused app and your
-   previous clipboard text is restored.
-
-Other commands: `pywhispr devices` (list microphones), `pywhispr record --seconds 5`
-(mic test), `pywhispr transcribe file.wav`, `pywhispr download`.
+Just downlaod the latest [release]( https://github.com/benstaniford/PyWhispr/releases) for Mac / Windows and run the installer.
 
 ## macOS permissions
 
