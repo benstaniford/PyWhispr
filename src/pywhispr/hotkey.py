@@ -169,36 +169,54 @@ def _double_tap_token(hotkey: str) -> str:
     return token
 
 
-class DoubleTapListener(HotkeyListener):
-    """Fires when a modifier key is tapped twice in quick succession.
+class DoubleTapState:
+    """Timing logic for a modifier double-tap, independent of the event source.
 
-    Watches raw key events via pynput, so unlike the chord listeners this
-    requires the Input Monitoring permission on macOS. A tap pair only counts
-    if no other key was pressed in between (so e.g. rapid Cmd+C, Cmd+V does
-    not trigger a cmd double-tap).
+    Feed it discrete taps of the target modifier (with a flag saying whether
+    another key intervened). Returns True on the tap that completes a pair.
+    """
+
+    def __init__(self, interval: float = DOUBLE_TAP_INTERVAL):
+        self._interval = interval
+        self._last_tap = 0.0
+
+    def tap(self, now: float, interrupted: bool = False) -> bool:
+        if not interrupted and 0.0 < now - self._last_tap <= self._interval:
+            self._last_tap = 0.0  # consume, so a third tap doesn't re-fire
+            return True
+        self._last_tap = now
+        return False
+
+    def interrupt(self) -> None:
+        """Another key was pressed; cancel any pending first tap."""
+        self._last_tap = 0.0
+
+
+class DoubleTapListener(HotkeyListener):
+    """Double-tap detection via pynput (Windows/Linux).
+
+    Requires no special permission on Windows. Not used on macOS — pynput's
+    keyboard.Listener builds its keycode map with Carbon HIToolbox calls off
+    the main thread (keycode_context), which segfaults when combined with our
+    Carbon hotkey registration; MacDoubleTapListener is used there instead.
     """
 
     def __init__(self, hotkey: str, on_toggle: Callable[[], None]):
         super().__init__(hotkey, on_toggle)
         self._token = _double_tap_token(hotkey)
         self._listener = None
-        self._last_tap = 0.0
-        self._interrupted = False  # another key was pressed since the last tap
+        self._state = DoubleTapState()
         self._held = False  # guards against OS key-repeat while held
 
     def _handle_press(self, is_target: bool, now: float) -> None:
         if not is_target:
-            self._interrupted = True
+            self._state.interrupt()
             return
         if self._held:
             return
         self._held = True
-        if not self._interrupted and now - self._last_tap <= DOUBLE_TAP_INTERVAL:
-            self._last_tap = 0.0
+        if self._state.tap(now):
             self._fire()
-        else:
-            self._last_tap = now
-        self._interrupted = False
 
     def start(self) -> None:
         from pynput import keyboard
@@ -226,8 +244,68 @@ class DoubleTapListener(HotkeyListener):
             self._listener = None
 
 
+# Device-independent NSEvent modifier flags (AppKit).
+_NS_MODIFIER_FLAGS = {
+    "<shift>": 1 << 17,
+    "<ctrl>": 1 << 18,
+    "<alt>": 1 << 19,
+    "<cmd>": 1 << 20,
+}
+_NS_MOD_MASK = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)
+
+
+class MacDoubleTapListener(HotkeyListener):
+    """Double-tap detection on macOS via a Cocoa NSEvent global monitor.
+
+    The handler runs on the main thread's Cocoa run loop (driven by Qt), so it
+    avoids pynput's off-main-thread Carbon keycode setup entirely. Global
+    monitors need the Input Monitoring permission; without it the handler
+    simply never fires (no crash).
+    """
+
+    def __init__(self, hotkey: str, on_toggle: Callable[[], None]):
+        super().__init__(hotkey, on_toggle)
+        self._token = _double_tap_token(hotkey)
+        self._flag = _NS_MODIFIER_FLAGS[self._token]
+        self._monitor = None
+        self._state = DoubleTapState()
+        self._was_down = False
+
+    def _on_flags_changed(self, flags: int) -> None:
+        target_down = bool(flags & self._flag)
+        other_mods_down = bool(flags & _NS_MOD_MASK & ~self._flag)
+        if target_down and not self._was_down:  # rising edge = a tap
+            if self._state.tap(time.monotonic(), interrupted=other_mods_down):
+                self._fire()
+        self._was_down = target_down
+
+    def start(self) -> None:
+        from AppKit import NSEvent, NSEventMaskFlagsChanged, NSEventMaskKeyDown
+
+        def handler(event):
+            if event.type() == 10:  # NSEventTypeKeyDown: a normal key breaks the pair
+                self._state.interrupt()
+            else:
+                self._on_flags_changed(int(event.modifierFlags()))
+
+        # Keep a reference: the monitor object is the block's owner.
+        self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSEventMaskFlagsChanged | NSEventMaskKeyDown, handler
+        )
+        log.info("Listening for double-tap of %s (NSEvent monitor)", self._token)
+
+    def stop(self) -> None:
+        if self._monitor is not None:
+            from AppKit import NSEvent
+
+            NSEvent.removeMonitor_(self._monitor)
+            self._monitor = None
+
+
 def create_hotkey_listener(hotkey: str, on_toggle: Callable[[], None]) -> HotkeyListener:
     if hotkey.startswith(DOUBLE_TAP_PREFIX):
+        if sys.platform == "darwin":
+            return MacDoubleTapListener(hotkey, on_toggle)
         return DoubleTapListener(hotkey, on_toggle)
     if sys.platform == "darwin":
         return MacHotkeyListener(hotkey, on_toggle)
