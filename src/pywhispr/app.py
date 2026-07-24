@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, auto
 from importlib.resources import files
@@ -17,6 +18,7 @@ from pywhispr.audio import AudioRecorder
 from pywhispr.config import Config, load_config, save_config
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
+from pywhispr.logging_setup import log_environment, log_path
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
 from pywhispr.stt import create_backend
 from pywhispr.stt.base import SAMPLE_RATE
@@ -60,6 +62,7 @@ class PyWhisprApp(QObject):
         self.state = State.LOADING
 
         self.backend = create_backend(cfg)
+        log.debug("Backend selected: %s", self.backend.name)
         self.overlay = OverlayWindow()
         self.tray = TrayIcon(
             on_quit=self._quit,
@@ -116,6 +119,14 @@ class PyWhisprApp(QObject):
     # -- startup / shutdown ------------------------------------------------
 
     def start(self) -> None:
+        log_environment()
+        log.info(
+            "Starting: hotkey=%s, device=%s, api=%s, max_recording=%ss",
+            self.cfg.hotkey,
+            self.cfg.input_device if self.cfg.input_device is not None else "system default",
+            f"{self.cfg.api_host}:{self.cfg.api_port}" if self.cfg.api_enabled else "disabled",
+            self.cfg.max_recording_seconds,
+        )
         self.tray.show()
         self.tray.set_status("Loading model…")
         if self.api is not None and not self.api.start():
@@ -127,23 +138,33 @@ class PyWhisprApp(QObject):
             self.tray.notify("PyWhispr: clipboard mode", MACOS_PERMISSIONS_HELP)
         try:
             self.listener.start()
+            log.info("Hotkey listener started (%s)", type(self.listener).__name__)
         except Exception as exc:  # bad hotkey string, missing permission, ...
-            self._fatal(f"Could not register hotkey {self.cfg.hotkey!r}: {exc}")
-            return
+            # Not fatal: the tray menu can still change the hotkey or quit, and
+            # an app that silently disappears teaches the user nothing.
+            log.exception("Could not register hotkey %r", self.cfg.hotkey)
+            self._report_error(
+                "Hotkey not registered",
+                f"Could not register {self.cfg.hotkey!r}: {exc}. "
+                "Use the tray menu to pick a different one.",
+            )
         self._check_double_tap_permission(self.cfg.hotkey)
 
         def load():
+            started = time.monotonic()
             try:
                 self.backend.load()
+                log.info("Model ready in %.1fs", time.monotonic() - started)
                 self._model_ready.emit()
             except Exception as exc:
-                log.exception("Model load failed")
-                self._model_failed.emit(str(exc))
+                log.exception("Model load failed after %.1fs", time.monotonic() - started)
+                self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
         log.info("Loading %s (first run downloads the model, ~600 MB)...", self.backend.name)
         self._worker.submit(load)
 
     def _quit(self) -> None:
+        log.info("Quitting")
         self.listener.stop()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
@@ -152,10 +173,16 @@ class PyWhisprApp(QObject):
         self._worker.shutdown(wait=False)
         QApplication.quit()
 
-    def _fatal(self, message: str) -> None:
-        log.error(message)
-        self.tray.notify("PyWhispr error", message)
-        QTimer.singleShot(8000, self._quit)
+    def _report_error(self, title: str, message: str) -> None:
+        """Surface a non-recoverable-but-not-fatal error without exiting.
+
+        Tray balloons are easy to miss (Windows routes them straight to the
+        notification centre), so the message also lands in the tray tooltip,
+        in the log, and on the overlay the next time the hotkey is pressed.
+        """
+        log.error("%s: %s", title, message)
+        self.tray.set_status(message)
+        self.tray.notify(title, f"{message}\n\nDetails: {log_path()}")
 
     # -- network API hooks (called on API request threads) --------------------
 
@@ -182,17 +209,35 @@ class PyWhisprApp(QObject):
 
     # -- state transitions (main thread only) --------------------------------
 
+    def _set_state(self, state: State) -> None:
+        """Single funnel for state changes, so the log shows the machine move.
+
+        A stuck state is the symptom of nearly every "nothing happened" bug, so
+        every transition is recorded with where it came from.
+        """
+        if state is not self.state:
+            log.debug("State %s → %s", self.state.name, state.name)
+        self.state = state
+
     def _on_model_ready(self) -> None:
-        self.state = State.IDLE
+        self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
         log.info("Ready. Press %s to start/stop dictation.", self.cfg.hotkey)
 
     def _on_model_failed(self, message: str) -> None:
+        """Model load failed: stay alive and keep saying so.
+
+        The app used to quit 8 seconds later, which looked identical to a
+        crash — the tray icon just vanished and no window was ever shown. Now
+        it stays in LOADING with an error recorded, so the tooltip, the
+        overlay, /v1/health and the log all name the cause.
+        """
         self._model_error = message
-        self._fatal(f"Model failed to load: {message}")
+        self._report_error("Model failed to load", message)
 
     def _on_activate(self) -> None:
         """Hotkey pressed (chord, or the second tap of a double-tap)."""
+        log.debug("Hotkey activated in state %s", self.state.name)
         self._activation_started_recording = self.state == State.IDLE
         self._on_toggle()
 
@@ -215,13 +260,18 @@ class PyWhisprApp(QObject):
 
     def _on_toggle(self) -> None:
         if self.state == State.LOADING:
-            self.overlay.show_status("Loading model…")
+            # Failed loads stay in LOADING, so say which of the two it is.
+            message = "Model failed — see log" if self._model_error else "Loading model…"
+            self.overlay.show_status(message)
             QTimer.singleShot(1500, lambda: self.state == State.LOADING and self.overlay.hide_overlay())
+            if self._model_error:
+                log.warning("Hotkey pressed but the model never loaded: %s", self._model_error)
         elif self.state == State.IDLE:
             self._start_recording()
         elif self.state == State.RECORDING:
             self._stop_recording()
-        # TRANSCRIBING / INSERTING: ignore presses until the cycle completes
+        else:
+            log.debug("Hotkey ignored: still %s", self.state.name)
 
     def _start_recording(self) -> None:
         try:
@@ -230,7 +280,7 @@ class PyWhisprApp(QObject):
             log.exception("Could not open microphone")
             self.tray.notify("Microphone error", str(exc))
             return
-        self.state = State.RECORDING
+        self._set_state(State.RECORDING)
         self._play(self._start_sound)
         self.overlay.show_recording()
         self.tray.set_status("Recording…", active=True)
@@ -240,16 +290,20 @@ class PyWhisprApp(QObject):
         self._max_duration_timer.stop()
         audio = self.recorder.stop()
         self._play(self._stop_sound)
-        self.state = State.TRANSCRIBING
+        self._set_state(State.TRANSCRIBING)
         self.overlay.show_status("Transcribing…")
         self.tray.set_status("Transcribing…")
+        log.info("Transcribing %.1fs of audio", len(audio) / SAMPLE_RATE)
 
         def transcribe():
+            started = time.monotonic()
             try:
-                self._transcribed.emit(self.backend.transcribe(audio))
+                text = self.backend.transcribe(audio)
+                log.info("Transcription took %.1fs", time.monotonic() - started)
+                self._transcribed.emit(text)
             except Exception as exc:
                 log.exception("Transcription failed")
-                self._transcribe_failed.emit(str(exc))
+                self._transcribe_failed.emit(f"{type(exc).__name__}: {exc}")
 
         self._worker.submit(transcribe)
 
@@ -264,15 +318,17 @@ class PyWhisprApp(QObject):
             self._finish_cycle()
             return
         log.info("Transcribed %d characters", len(text))
-        self.state = State.INSERTING
+        self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
         self.injector.insert(text)
 
     def _on_transcribe_failed(self, message: str) -> None:
+        log.error("Transcription failed: %s", message)
         self.tray.notify("Transcription failed", message)
         self._finish_cycle()
 
     def _on_insert_finished(self, auto_pasted: bool) -> None:
+        log.debug("Insertion finished (auto_pasted=%s)", auto_pasted)
         if not auto_pasted:
             paste_key = "Cmd+V" if sys.platform == "darwin" else "Ctrl+V"
             self.tray.notify(
@@ -282,7 +338,7 @@ class PyWhisprApp(QObject):
 
     def _finish_cycle(self) -> None:
         self.overlay.hide_overlay()
-        self.state = State.IDLE
+        self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
 
     def _change_hotkey(self) -> None:
@@ -354,8 +410,10 @@ class PyWhisprApp(QObject):
 def run_app() -> int:
     from PySide6.QtGui import QIcon
 
+    from pywhispr.logging_setup import install_qt_message_handler
     from pywhispr.tray import app_pixmap
 
+    install_qt_message_handler()  # before QApplication, to catch platform-plugin gripes
     app = QApplication(sys.argv)
     app.setApplicationName("PyWhispr")
     app.setWindowIcon(QIcon(app_pixmap()))

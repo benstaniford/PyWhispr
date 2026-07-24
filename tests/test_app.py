@@ -98,6 +98,29 @@ def test_full_cycle(app, qtbot):
     assert app.state == State.IDLE
 
 
+class TestModelLoadFailure:
+    """A failed load must leave a running, complaining app — not a vanished one."""
+
+    def test_does_not_quit(self, app):
+        with patch("pywhispr.app.QApplication.quit") as quit_:
+            app._on_model_failed("RuntimeError: no CUDA")
+            quit_.assert_not_called()
+        assert app.state == State.LOADING
+        assert app._model_error == "RuntimeError: no CUDA"
+
+    def test_tray_and_overlay_report_it(self, app):
+        app._on_model_failed("RuntimeError: no CUDA")
+        app.tray.notify.assert_called_once()
+        with patch.object(app.overlay, "show_status") as show_status:
+            app._on_toggle()
+        show_status.assert_called_once_with("Model failed — see log")
+
+    def test_still_loading_shows_the_loading_message(self, app):
+        with patch.object(app.overlay, "show_status") as show_status:
+            app._on_toggle()
+        show_status.assert_called_once_with("Loading model…")
+
+
 def test_toggle_ignored_while_transcribing(app):
     app.state = State.TRANSCRIBING
     app._on_toggle()

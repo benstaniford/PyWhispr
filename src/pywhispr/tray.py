@@ -9,6 +9,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from pywhispr.config import config_path
+from pywhispr.logging_setup import log_path
 
 
 def app_pixmap() -> QPixmap:
@@ -56,6 +57,11 @@ class TrayIcon(QSystemTrayIcon):
         open_config = QAction("Open config file", menu)
         open_config.triggered.connect(self._open_config)
         menu.addAction(open_config)
+        # The packaged Windows build has no console, so this is the only way a
+        # user can get at what actually went wrong.
+        open_log = QAction("Open log file", menu)
+        open_log.triggered.connect(self._open_log)
+        menu.addAction(open_log)
         menu.addSeparator()
         quit_action = QAction("Quit PyWhispr", menu)
         quit_action.triggered.connect(on_quit)
@@ -68,9 +74,19 @@ class TrayIcon(QSystemTrayIcon):
         self.setIcon(self._active_icon if active else self._idle_icon)
 
     def _open_config(self) -> None:
+        self._open(config_path())
+
+    def _open_log(self) -> None:
+        path = log_path()
+        # Nothing has been logged yet if the file could not be created; opening
+        # the folder at least shows the user where to look.
+        self._open(path if path.exists() else path.parent)
+
+    @staticmethod
+    def _open(path) -> None:
         from PySide6.QtGui import QDesktopServices
 
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_path())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def notify(self, title: str, message: str) -> None:
         if self.supportsMessages():

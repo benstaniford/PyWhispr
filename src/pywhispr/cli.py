@@ -37,17 +37,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("download", help="pre-download the speech-to-text model")
 
+    sub.add_parser(
+        "diagnose", help="print environment details and test-load the model (for bug reports)"
+    )
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    from pywhispr.logging_setup import setup_logging
+
+    log_file = setup_logging(verbose=args.verbose or None)
 
     command = args.command or "run"
+    if log_file is not None:
+        log.debug("Logging to %s", log_file)
 
     if command == "run":
         from pywhispr.app import run_app
@@ -65,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "download":
         return _cmd_download()
+
+    if command == "diagnose":
+        return _cmd_diagnose()
 
     return 2
 
@@ -122,4 +130,53 @@ def _cmd_record(seconds: float) -> int:
 def _cmd_download() -> int:
     _load_backend()
     print("Model downloaded and loaded successfully.")
+    return 0
+
+
+def _cmd_diagnose() -> int:
+    """Everything a bug report needs, in one console-visible run.
+
+    The packaged app hides these failures behind a tray icon; running this from
+    a terminal on the same machine reproduces the load with the output visible.
+    """
+    import time
+
+    import numpy as np
+
+    from pywhispr.logging_setup import environment_report, log_path
+
+    for line in environment_report():
+        print(line)
+
+    print("\n--- microphone ---")
+    try:
+        import sounddevice as sd
+
+        inputs = [d for d in sd.query_devices() if d["max_input_channels"] > 0]
+        print(f"{len(inputs)} input device(s); default: {sd.query_devices(kind='input')['name']}")
+    except Exception as exc:
+        print(f"FAILED: {type(exc).__name__}: {exc}")
+
+    print("\n--- model load ---")
+    started = time.monotonic()
+    try:
+        backend = _load_backend()
+    except Exception as exc:
+        log.exception("Model load failed")
+        print(f"FAILED after {time.monotonic() - started:.1f}s: {type(exc).__name__}: {exc}")
+        print(f"\nFull traceback in {log_path()}")
+        return 1
+    print(f"loaded in {time.monotonic() - started:.1f}s")
+
+    print("\n--- transcribe (1s of silence) ---")
+    started = time.monotonic()
+    try:
+        text = backend.transcribe(np.zeros(16000, dtype=np.float32))
+    except Exception as exc:
+        log.exception("Transcription failed")
+        print(f"FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    print(f"ok in {time.monotonic() - started:.1f}s (result: {text!r})")
+
+    print(f"\nAll checks passed. Log: {log_path()}")
     return 0

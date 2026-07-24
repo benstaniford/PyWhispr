@@ -1,28 +1,24 @@
-"""Frozen-app entry point (PyInstaller on macOS, cx_Freeze on Windows)."""
+"""Frozen-app entry point (PyInstaller on macOS, cx_Freeze on Windows).
 
-import faulthandler
-import logging
+Logging is configured before anything heavy is imported, so that an import
+error — a missing DLL, a backend that will not load — is recorded rather than
+killing a process nobody can see. See pywhispr.logging_setup for where the
+files land.
+"""
+
 import sys
 
-# The Windows gui-base build has no console, so sys.stdout/sys.stderr are None.
-# Anything that writes to them (tqdm's HuggingFace download bar on first run,
-# stray print()s) then dies with "'NoneType' object has no attribute 'write'".
-# Point both at a log file so those writes go somewhere real instead of crashing.
-if sys.stderr is None or sys.stdout is None:
-    import tempfile
-    from pathlib import Path
+from pywhispr.logging_setup import redirect_stdio_if_headless, setup_logging
 
-    _log = open(Path(tempfile.gettempdir()) / "pywhispr-crash.log", "a", buffering=1)
-    if sys.stdout is None:
-        sys.stdout = _log
-    if sys.stderr is None:
-        sys.stderr = _log
-    faulthandler.enable(file=_log)
-else:
-    faulthandler.enable()
+stdio_path = redirect_stdio_if_headless()
+log_file = setup_logging()
 
-from pywhispr.app import run_app
+import logging  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger(__name__).info(
+    "Frozen launch: log=%s, stdio=%s", log_file, stdio_path or "console"
+)
+
+from pywhispr.app import run_app  # noqa: E402
 
 sys.exit(run_app())

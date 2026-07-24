@@ -1,5 +1,6 @@
+import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -26,6 +27,60 @@ class TestBackendSelection:
         with patch("sys.platform", "darwin"), patch("platform.machine", return_value="arm64"):
             backend = create_backend(Config(model_override="someone/custom-model"))
         assert "someone/custom-model" in backend.name
+
+
+class TestOnnxProviderFallback:
+    """onnxruntime-gpu advertises CUDAExecutionProvider even with no CUDA runtime,
+    so a load can only be trusted once it has actually succeeded."""
+
+    @pytest.fixture
+    def modules(self, monkeypatch):
+        onnxruntime = MagicMock()
+        onnxruntime.__version__ = "1.22.0"
+        onnxruntime.get_device.return_value = "GPU"
+        onnxruntime.get_available_providers.return_value = [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+        onnx_asr = MagicMock()
+        monkeypatch.setitem(sys.modules, "onnxruntime", onnxruntime)
+        monkeypatch.setitem(sys.modules, "onnx_asr", onnx_asr)
+        return onnx_asr, onnxruntime
+
+    def _backend(self):
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        return OnnxBackend()
+
+    def test_prefers_cuda_when_it_works(self, modules):
+        onnx_asr, _ = modules
+        backend = self._backend()
+        backend.load()
+        assert backend._providers == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert onnx_asr.load_model.call_count == 1
+
+    def test_falls_back_to_cpu_when_cuda_session_fails(self, modules):
+        onnx_asr, _ = modules
+        sentinel = object()
+        onnx_asr.load_model.side_effect = [RuntimeError("libcudart not found"), sentinel]
+
+        backend = self._backend()
+        backend.load()
+
+        assert backend._providers == ["CPUExecutionProvider"]
+        assert backend._model is sentinel
+        assert onnx_asr.load_model.call_args_list[-1].kwargs["providers"] == [
+            "CPUExecutionProvider"
+        ]
+
+    def test_cpu_only_failure_propagates(self, modules):
+        onnx_asr, onnxruntime = modules
+        onnxruntime.get_available_providers.return_value = ["CPUExecutionProvider"]
+        onnx_asr.load_model.side_effect = RuntimeError("model download failed")
+
+        with pytest.raises(RuntimeError, match="model download failed"):
+            self._backend().load()
+        assert onnx_asr.load_model.call_count == 1  # no pointless retry
 
 
 class TestWavReading:

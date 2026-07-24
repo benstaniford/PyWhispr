@@ -25,6 +25,19 @@ STT backends take in-memory numpy audio, so they're testable without a mic.
   `numba>=0.61` to stop bad backtracking.
 - `/Applications` is not writable; install the bundle to `~/Applications`.
 
+## Logging
+
+`pywhispr/logging_setup.py` owns all of it. Everything goes to a rotating file
+(`user_log_dir`) because the Windows build is a console-less GUI exe where
+stderr is `None` and otherwise nothing survives. It also installs
+`sys.excepthook` + `threading.excepthook` (worker-thread crashes used to vanish)
+and a Qt message handler. `PYWHISPR_DEBUG=1` turns on debug for the packaged
+app; `pywhispr diagnose` reproduces startup in a terminal with output visible.
+
+**Rule:** failures that leave the app unusable must not quit it. A tray app that
+exits is indistinguishable from a crash — report the error in the tray tooltip,
+the overlay and the log, and stay running.
+
 ## Debugging native crashes here
 
 - **`lldb` attach is blocked by MDM** and **ReportCrash is disabled** (no

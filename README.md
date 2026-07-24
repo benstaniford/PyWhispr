@@ -44,7 +44,11 @@ this. (On Windows, double-tap works without any special permission.)
 - An RTX 50-series GPU (Blackwell) needs `onnxruntime-gpu` ≥ 1.22 (pinned already), an
   NVIDIA driver ≥ 570 and CUDA 12.8+ runtime.
 - If CUDA isn't usable, PyWhispr logs a warning and runs on CPU (still fast — Parakeet
-  is a 0.6B model).
+  is a 0.6B model). Note that `onnxruntime-gpu` *advertises* `CUDAExecutionProvider`
+  whether or not a CUDA runtime is installed, so the real failure only appears when the
+  model is loaded; PyWhispr catches that and retries on CPU.
+- A failed model load no longer quits the app — it stays in the tray and reports the
+  error. See [Logs & troubleshooting](#logs--troubleshooting).
 
 ## Configuration
 
@@ -176,6 +180,35 @@ Debug.Log(req.downloadHandler.text);   // {"text": "...", ...}
 
 Streaming (partial results over a WebSocket) isn't implemented; the `/v1` prefix leaves
 room to add it without breaking these clients.
+
+## Logs & troubleshooting
+
+If the app misbehaves — the overlay says *Loading model…* forever, the hotkey
+does nothing, the tray icon disappears — the log has the answer. Tray menu →
+**Open log file**, or find it at:
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\PyWhispr\Logs\pywhispr.log` |
+| macOS | `~/Library/Logs/PyWhispr/pywhispr.log` |
+| Linux | `~/.local/state/PyWhispr/log/pywhispr.log` |
+
+It rotates at 2 MB (3 backups) and starts with a report of the machine:
+versions, ONNX Runtime providers, model cache contents and any proxy/TLS
+overrides. Alongside it, `pywhispr-stderr.log` catches raw output from the
+packaged builds that have no console — the first-run download progress bar and
+native crash tracebacks (`faulthandler`).
+
+For more detail, set `PYWHISPR_DEBUG=1` before starting the app (equivalent to
+`--verbose`, but works for the packaged app where there's no command line).
+Debug logging records every state transition, so a stuck cycle is obvious.
+
+To reproduce a startup failure with the output in front of you, run the same
+checks from a terminal:
+
+```sh
+pywhispr diagnose    # environment report, mic check, model load, test transcribe
+```
 
 ## Corporate proxies / TLS interception
 
