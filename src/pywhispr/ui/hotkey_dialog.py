@@ -7,6 +7,7 @@ Input Monitoring or other permission is involved in capturing the chord.
 from __future__ import annotations
 
 import sys
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -16,7 +17,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from pywhispr.hotkey import validate_chord
+from pywhispr.hotkey import DOUBLE_TAP_PREFIX, pretty_chord, validate_chord
+
+DOUBLE_TAP_CAPTURE_WINDOW = 0.5  # seconds between taps while recording
 
 # Qt swaps Command and Control on macOS: ControlModifier is ⌘, MetaModifier is ⌃.
 _MODIFIER_TOKENS_DARWIN = [
@@ -87,9 +90,17 @@ def key_event_to_chord(
     return "+".join(parts)
 
 
-def pretty_chord(chord: str) -> str:
-    """'<cmd>+<shift>+<space>' → 'Cmd+Shift+Space' for display."""
-    return "+".join(t.strip("<>").replace("_", " ").title() for t in chord.split("+"))
+def modifier_key_token(key: int, platform: str = sys.platform) -> str | None:
+    """Map a bare modifier keypress to its chord token (respecting Qt's ⌘/⌃ swap)."""
+    if key == Qt.Key.Key_Alt:
+        return "<alt>"
+    if key == Qt.Key.Key_Shift:
+        return "<shift>"
+    if key == Qt.Key.Key_Control:
+        return "<cmd>" if platform == "darwin" else "<ctrl>"
+    if key == Qt.Key.Key_Meta:
+        return "<ctrl>" if platform == "darwin" else "<cmd>"
+    return None
 
 
 class HotkeyCaptureDialog(QDialog):
@@ -101,9 +112,13 @@ class HotkeyCaptureDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumWidth(340)
         self._chord: str | None = None
+        self._last_mod_token: str | None = None
+        self._last_mod_time = 0.0
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Press the new dictation hotkey\n(needs at least one modifier):"))
+        layout.addWidget(
+            QLabel("Press the new dictation hotkey\n(a chord, or double-tap a modifier key):")
+        )
 
         self._display = QLabel(pretty_chord(current))
         self._display.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -134,6 +149,8 @@ class HotkeyCaptureDialog(QDialog):
         super().hideEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        if event.isAutoRepeat():  # a held modifier must not count as two taps
+            return
         if (
             event.key() == Qt.Key.Key_Escape
             and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
@@ -143,7 +160,12 @@ class HotkeyCaptureDialog(QDialog):
 
         chord = key_event_to_chord(event.key(), event.modifiers())
         if chord is None:
-            return
+            chord = self._detect_double_tap(event.key())
+            if chord is None:
+                return
+        else:
+            self._last_mod_token = None
+
         try:
             validate_chord(chord)
         except ValueError:
@@ -154,6 +176,21 @@ class HotkeyCaptureDialog(QDialog):
         self._display.setText(pretty_chord(chord))
         self._hint.setText("Esc cancels")
         self._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
+
+    def _detect_double_tap(self, key: int) -> str | None:
+        """Two quick presses of the same bare modifier → a double-tap chord."""
+        token = modifier_key_token(key)
+        if token is None:
+            self._last_mod_token = None
+            return None
+        now = time.monotonic()
+        if self._last_mod_token == token and now - self._last_mod_time <= DOUBLE_TAP_CAPTURE_WINDOW:
+            self._last_mod_token = None
+            return f"{DOUBLE_TAP_PREFIX}{token}"
+        self._last_mod_token = token
+        self._last_mod_time = now
+        self._hint.setText(f"Tap {token.strip('<>').title()} again for a double-tap hotkey")
+        return None
 
     @staticmethod
     def capture(current: str, parent=None) -> str | None:

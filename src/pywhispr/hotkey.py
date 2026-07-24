@@ -149,7 +149,86 @@ class MacHotkeyListener(HotkeyListener):
             self._registration = None
 
 
+DOUBLE_TAP_PREFIX = "double-tap:"
+DOUBLE_TAP_INTERVAL = 0.4  # max seconds between the two taps
+
+_PYNPUT_MODIFIER_SETS = {
+    "<cmd>": ("cmd", "cmd_l", "cmd_r"),
+    "<ctrl>": ("ctrl", "ctrl_l", "ctrl_r"),
+    "<alt>": ("alt", "alt_l", "alt_r", "alt_gr"),
+    "<shift>": ("shift", "shift_l", "shift_r"),
+}
+
+
+def _double_tap_token(hotkey: str) -> str:
+    token = hotkey[len(DOUBLE_TAP_PREFIX) :].strip().lower()
+    if token not in _PYNPUT_MODIFIER_SETS:
+        raise ValueError(
+            f"Unsupported double-tap key {token!r}; use one of {list(_PYNPUT_MODIFIER_SETS)}"
+        )
+    return token
+
+
+class DoubleTapListener(HotkeyListener):
+    """Fires when a modifier key is tapped twice in quick succession.
+
+    Watches raw key events via pynput, so unlike the chord listeners this
+    requires the Input Monitoring permission on macOS. A tap pair only counts
+    if no other key was pressed in between (so e.g. rapid Cmd+C, Cmd+V does
+    not trigger a cmd double-tap).
+    """
+
+    def __init__(self, hotkey: str, on_toggle: Callable[[], None]):
+        super().__init__(hotkey, on_toggle)
+        self._token = _double_tap_token(hotkey)
+        self._listener = None
+        self._last_tap = 0.0
+        self._interrupted = False  # another key was pressed since the last tap
+        self._held = False  # guards against OS key-repeat while held
+
+    def _handle_press(self, is_target: bool, now: float) -> None:
+        if not is_target:
+            self._interrupted = True
+            return
+        if self._held:
+            return
+        self._held = True
+        if not self._interrupted and now - self._last_tap <= DOUBLE_TAP_INTERVAL:
+            self._last_tap = 0.0
+            self._fire()
+        else:
+            self._last_tap = now
+        self._interrupted = False
+
+    def start(self) -> None:
+        from pynput import keyboard
+
+        targets = {
+            getattr(keyboard.Key, name)
+            for name in _PYNPUT_MODIFIER_SETS[self._token]
+            if hasattr(keyboard.Key, name)
+        }
+
+        def on_press(key):
+            self._handle_press(key in targets, time.monotonic())
+
+        def on_release(key):
+            if key in targets:
+                self._held = False
+
+        self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self._listener.start()
+        log.info("Listening for double-tap of %s (pynput)", self._token)
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            self._listener.stop()
+            self._listener = None
+
+
 def create_hotkey_listener(hotkey: str, on_toggle: Callable[[], None]) -> HotkeyListener:
+    if hotkey.startswith(DOUBLE_TAP_PREFIX):
+        return DoubleTapListener(hotkey, on_toggle)
     if sys.platform == "darwin":
         return MacHotkeyListener(hotkey, on_toggle)
     return PynputHotkeyListener(hotkey, on_toggle)
@@ -157,7 +236,9 @@ def create_hotkey_listener(hotkey: str, on_toggle: Callable[[], None]) -> Hotkey
 
 def validate_chord(hotkey: str) -> None:
     """Raise ValueError if this platform's listener can't register the chord."""
-    if sys.platform == "darwin":
+    if hotkey.startswith(DOUBLE_TAP_PREFIX):
+        _double_tap_token(hotkey)
+    elif sys.platform == "darwin":
         parse_mac_chord(hotkey)
     else:
         from pynput import keyboard
@@ -166,3 +247,11 @@ def validate_chord(hotkey: str) -> None:
         tokens = [t.strip().lower() for t in hotkey.split("+")]
         if not any(t in _MAC_MODIFIER_NAMES for t in tokens):
             raise ValueError(f"Hotkey {hotkey!r} needs at least one modifier (cmd/ctrl/alt/shift)")
+
+
+def pretty_chord(chord: str) -> str:
+    """'<cmd>+<shift>+<space>' → 'Cmd+Shift+Space'; 'double-tap:<alt>' → 'Double-tap Alt'."""
+    if chord.startswith(DOUBLE_TAP_PREFIX):
+        token = chord[len(DOUBLE_TAP_PREFIX) :]
+        return f"Double-tap {token.strip('<>').title()}"
+    return "+".join(t.strip("<>").replace("_", " ").title() for t in chord.split("+"))

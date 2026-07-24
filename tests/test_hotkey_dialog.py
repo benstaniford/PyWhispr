@@ -2,7 +2,12 @@ import sys
 
 from PySide6.QtCore import Qt
 
-from pywhispr.ui.hotkey_dialog import HotkeyCaptureDialog, key_event_to_chord, pretty_chord
+from pywhispr.hotkey import pretty_chord
+from pywhispr.ui.hotkey_dialog import (
+    HotkeyCaptureDialog,
+    key_event_to_chord,
+    modifier_key_token,
+)
 
 CTRL = Qt.KeyboardModifier.ControlModifier
 META = Qt.KeyboardModifier.MetaModifier
@@ -38,7 +43,34 @@ class TestChordConversion:
         assert pretty_chord("<ctrl>+<page_down>") == "Ctrl+Page Down"
 
 
+class TestModifierTokens:
+    def test_darwin_swaps_control_and_meta(self):
+        assert modifier_key_token(Qt.Key.Key_Control, platform="darwin") == "<cmd>"
+        assert modifier_key_token(Qt.Key.Key_Meta, platform="darwin") == "<ctrl>"
+
+    def test_windows_mapping(self):
+        assert modifier_key_token(Qt.Key.Key_Control, platform="win32") == "<ctrl>"
+        assert modifier_key_token(Qt.Key.Key_Meta, platform="win32") == "<cmd>"
+
+    def test_non_modifier_gives_none(self):
+        assert modifier_key_token(Qt.Key.Key_D) is None
+
+
 class TestDialog:
+    def test_double_tap_modifier_captured(self, qtbot):
+        dialog = HotkeyCaptureDialog("<cmd>+<shift>+<space>")
+        qtbot.addWidget(dialog)
+        qtbot.keyClick(dialog, Qt.Key.Key_Alt)
+        qtbot.keyClick(dialog, Qt.Key.Key_Alt)
+        assert dialog._chord == "double-tap:<alt>"
+
+    def test_two_different_modifiers_do_not_capture(self, qtbot):
+        dialog = HotkeyCaptureDialog("<cmd>+<shift>+<space>")
+        qtbot.addWidget(dialog)
+        qtbot.keyClick(dialog, Qt.Key.Key_Alt)
+        qtbot.keyClick(dialog, Qt.Key.Key_Shift)
+        assert dialog._chord is None
+
     def test_valid_chord_enables_save(self, qtbot):
         dialog = HotkeyCaptureDialog("<cmd>+<shift>+<space>")
         qtbot.addWidget(dialog)

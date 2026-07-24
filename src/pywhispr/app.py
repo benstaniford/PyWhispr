@@ -92,6 +92,7 @@ class PyWhisprApp(QObject):
         except Exception as exc:  # bad hotkey string, missing permission, ...
             self._fatal(f"Could not register hotkey {self.cfg.hotkey!r}: {exc}")
             return
+        self._check_double_tap_permission(self.cfg.hotkey)
 
         def load():
             try:
@@ -217,6 +218,7 @@ class PyWhisprApp(QObject):
                 self.cfg.hotkey = new_chord
                 save_config(self.cfg)
                 log.info("Hotkey changed to %s", new_chord)
+                self._check_double_tap_permission(new_chord)
             except Exception as exc:
                 log.exception("Could not register new hotkey")
                 self.tray.notify("Hotkey not changed", f"Could not register {new_chord!r}: {exc}")
@@ -227,6 +229,22 @@ class PyWhisprApp(QObject):
 
         if self.state != State.LOADING:
             self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
+
+    def _check_double_tap_permission(self, chord: str) -> None:
+        """Double-tap hotkeys need Input Monitoring on macOS; guide the user."""
+        from pywhispr.hotkey import DOUBLE_TAP_PREFIX
+        from pywhispr.platform_setup import (
+            MACOS_INPUT_MONITORING_HELP,
+            check_macos_input_monitoring,
+            request_macos_input_monitoring,
+        )
+
+        if not chord.startswith(DOUBLE_TAP_PREFIX):
+            return
+        if not check_macos_input_monitoring():
+            request_macos_input_monitoring()
+            log.warning(MACOS_INPUT_MONITORING_HELP)
+            self.tray.notify("Input Monitoring needed", MACOS_INPUT_MONITORING_HELP)
 
     # -- sounds --------------------------------------------------------------
 

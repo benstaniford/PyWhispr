@@ -57,6 +57,12 @@ launch PyWhispr from**, then fully restart that terminal:
 
 You can also start/stop dictation from the tray icon menu — no hotkey needed at all.
 
+**Exception — double-tap hotkeys:** a hotkey like double-tap-Option can't use the
+permission-free API; it has to listen for raw modifier taps, which macOS gates behind
+**Input Monitoring**. If you pick one via **Change hotkey…**, PyWhispr requests the
+permission and shows what to grant; relaunch it afterwards. Chord hotkeys never need
+this. (On Windows, double-tap works without any special permission.)
+
 ## Windows / NVIDIA notes
 
 - An RTX 50-series GPU (Blackwell) needs `onnxruntime-gpu` ≥ 1.22 (pinned already), an
@@ -71,7 +77,7 @@ You can also start/stop dictation from the tray icon menu — no hotkey needed a
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle chord — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>` |
+| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `max_recording_seconds` | `120` | Auto-stop guard |
