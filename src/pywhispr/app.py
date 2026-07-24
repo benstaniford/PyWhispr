@@ -210,8 +210,13 @@ class PyWhisprApp(QObject):
 
 
 def run_app() -> int:
+    from PySide6.QtGui import QIcon
+
+    from pywhispr.tray import app_pixmap
+
     app = QApplication(sys.argv)
     app.setApplicationName("PyWhispr")
+    app.setWindowIcon(QIcon(app_pixmap()))
     app.setQuitOnLastWindowClosed(False)  # tray app: no windows most of the time
 
     whispr = PyWhisprApp(load_config())

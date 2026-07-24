@@ -91,6 +91,34 @@ export SSL_CERT_FILE=/path/to/ca-bundle.pem REQUESTS_CA_BUNDLE=/path/to/ca-bundl
 
 For `uv` itself, use `export UV_SYSTEM_CERTS=1`.
 
+## Building a macOS app bundle
+
+```sh
+packaging/make_icns.sh                     # regenerate the .icns from assets/icon.png
+uv run --with pyinstaller pyinstaller packaging/pywhispr.spec --noconfirm
+cp -R dist/PyWhispr.app ~/Applications/
+```
+
+The bundle is menu-bar-only (`LSUIElement`), ad-hoc signed by PyInstaller, and needs no
+permissions to run (see above). Because it's built locally it never gets macOS's
+quarantine attribute, so Gatekeeper won't object even on managed machines — and the
+microphone prompt shows "PyWhispr" instead of your terminal's name.
+
+## Releases
+
+Pushing a tag like `v0.2.0` triggers GitHub Actions to build and attach to the release:
+
+- `PyWhispr-<tag>-macos-arm64.zip` — the `.app` bundle (PyInstaller, ad-hoc signed)
+- `PyWhispr-<tag>-windows-x64.msi` — per-user installer (cx_Freeze), no admin required
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Bump `version` in `pyproject.toml` and `src/pywhispr/__init__.py` first. Note the
+downloaded macOS zip carries the quarantine attribute, so on first launch users must
+right-click → Open (the bundle is ad-hoc signed, not notarized).
+
 ## Development
 
 ```sh
