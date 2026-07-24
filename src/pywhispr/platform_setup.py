@@ -8,13 +8,14 @@ import sys
 log = logging.getLogger(__name__)
 
 MACOS_PERMISSIONS_HELP = """\
-PyWhispr needs two macOS permissions, granted to the app you launch it from
-(e.g. Terminal or iTerm2) in System Settings → Privacy & Security:
+Accessibility permission is not granted, so PyWhispr cannot paste text into
+other apps automatically. Dictation still works: the transcript is copied to
+the clipboard — press Cmd+V yourself to paste it.
 
-  1. Input Monitoring  — to hear the global hotkey
-  2. Accessibility     — to paste text into other apps
-
-After granting them, fully quit and relaunch your terminal app.
+For automatic pasting, grant Accessibility to the app you launch PyWhispr
+from (e.g. Terminal) in System Settings → Privacy & Security → Accessibility,
+then fully relaunch that app. No other permission is needed; the global
+hotkey works without Input Monitoring.
 (Microphone access is prompted automatically the first time you record.)
 """
 
@@ -33,7 +34,7 @@ def check_macos_accessibility() -> bool:
 
 
 def warn_if_missing_permissions() -> bool:
-    """Log guidance if required permissions look missing. Returns True if OK."""
+    """Log guidance if auto-paste won't work. Returns True if fully functional."""
     if sys.platform != "darwin":
         return True
     if not check_macos_accessibility():

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from pywhispr.audio import AudioRecorder
 from pywhispr.config import Config, load_config
-from pywhispr.hotkey import HotkeyListener
+from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
 from pywhispr.stt import create_backend
@@ -54,10 +54,10 @@ class PyWhisprApp(QObject):
 
         self.backend = create_backend(cfg)
         self.overlay = OverlayWindow()
-        self.tray = TrayIcon(on_quit=self._quit)
+        self.tray = TrayIcon(on_quit=self._quit, on_toggle=self._hotkey_toggled.emit)
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
-        self.listener = HotkeyListener(cfg.hotkey, on_toggle=self._hotkey_toggled.emit)
+        self.listener = create_hotkey_listener(cfg.hotkey, on_toggle=self._hotkey_toggled.emit)
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
 
         self._max_duration_timer = QTimer(self)
@@ -82,7 +82,7 @@ class PyWhisprApp(QObject):
         self.tray.show()
         self.tray.set_status("Loading model…")
         if not warn_if_missing_permissions():
-            self.tray.notify("PyWhispr needs permissions", MACOS_PERMISSIONS_HELP)
+            self.tray.notify("PyWhispr: clipboard mode", MACOS_PERMISSIONS_HELP)
         try:
             self.listener.start()
         except Exception as exc:  # bad hotkey string, missing permission, ...
@@ -181,7 +181,12 @@ class PyWhisprApp(QObject):
         self.tray.notify("Transcription failed", message)
         self._finish_cycle()
 
-    def _on_insert_finished(self) -> None:
+    def _on_insert_finished(self, auto_pasted: bool) -> None:
+        if not auto_pasted:
+            paste_key = "Cmd+V" if sys.platform == "darwin" else "Ctrl+V"
+            self.tray.notify(
+                "Copied to clipboard", f"Press {paste_key} to paste your dictation."
+            )
         self._finish_cycle()
 
     def _finish_cycle(self) -> None:

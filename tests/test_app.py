@@ -53,7 +53,7 @@ def test_full_cycle(app, qtbot):
         assert app.state == State.INSERTING
         insert.assert_called_once_with("hello world")
 
-    app.injector.finished.emit()
+    app.injector.finished.emit(True)
     assert app.state == State.IDLE
 
 

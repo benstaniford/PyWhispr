@@ -42,12 +42,20 @@ Other commands: `pywhispr devices` (list microphones), `pywhispr record --second
 
 ## macOS permissions
 
-Grant these to the **terminal app you launch PyWhispr from** (System Settings →
-Privacy & Security), then fully restart that terminal:
+PyWhispr works with **zero permission grants** out of the box: the global hotkey uses
+the Carbon `RegisterEventHotKey` API (the same approach as Superwhisper), which needs
+no Input Monitoring, and without Accessibility the transcript is left on the clipboard
+with a "press ⌘V" notification instead of being pasted automatically. Microphone
+access is prompted automatically on first recording.
 
-1. **Input Monitoring** — required to hear the global hotkey
-2. **Accessibility** — required to paste text into other apps
-3. **Microphone** — prompted automatically on first recording
+For fully automatic pasting, grant one optional permission to the **terminal app you
+launch PyWhispr from**, then fully restart that terminal:
+
+- **Accessibility** (System Settings → Privacy & Security) — lets PyWhispr synthesize
+  the ⌘V keystroke so text lands in the focused app by itself, with your previous
+  clipboard restored afterwards.
+
+You can also start/stop dictation from the tray icon menu — no hotkey needed at all.
 
 ## Windows / NVIDIA notes
 
@@ -63,7 +71,7 @@ Privacy & Security), then fully restart that terminal:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle chord ([pynput syntax](https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.HotKey)) |
+| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle chord ([pynput syntax](https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.HotKey); modifiers + a letter, digit, `<space>` or `<f1>`–`<f20>`) |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `max_recording_seconds` | `120` | Auto-stop guard |

@@ -35,12 +35,21 @@ def _make_icon(active: bool = False) -> QIcon:
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, on_quit, parent=None):
+    def __init__(self, on_quit, on_toggle=None, parent=None):
         super().__init__(_make_icon(), parent)
         self._idle_icon = _make_icon(active=False)
         self._active_icon = _make_icon(active=True)
 
         menu = QMenu()
+        if on_toggle is not None:
+            toggle = QAction("Start/stop dictation", menu)
+            toggle.triggered.connect(on_toggle)
+            menu.addAction(toggle)
+            menu.addSeparator()
+            # On Windows a plain left-click toggles too (macOS opens the menu).
+            self.activated.connect(
+                lambda reason: reason == QSystemTrayIcon.ActivationReason.Trigger and on_toggle()
+            )
         open_config = QAction("Open config file", menu)
         open_config.triggered.connect(self._open_config)
         menu.addAction(open_config)
