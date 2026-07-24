@@ -15,10 +15,16 @@ sys.path.insert(0, str(ROOT / "src"))
 from pywhispr import __version__  # noqa: E402
 
 build_exe_options = {
-    "packages": ["pywhispr", "onnx_asr", "onnxruntime"],
+    # pynput must be forced in whole: it loads its _win32 backend via a
+    # string-built importlib call that cx_Freeze's scanner can't trace.
+    # pynput must be forced in whole: it loads its _win32 backend via a
+    # string-built importlib call that cx_Freeze's scanner can't trace.
+    "packages": ["pywhispr", "onnx_asr", "onnxruntime", "pynput", "_sounddevice_data"],
     # Keep pywhispr as real files so importlib.resources finds assets/.
+    # _sounddevice_data must also stay unzipped: sounddevice dlopens the
+    # portaudio DLL from that package's directory.
     "zip_include_packages": "*",
-    "zip_exclude_packages": ["pywhispr", "onnx_asr", "onnxruntime", "numpy"],
+    "zip_exclude_packages": ["pywhispr", "onnx_asr", "onnxruntime", "numpy", "_sounddevice_data"],
     "include_msvcr": True,
 }
 
