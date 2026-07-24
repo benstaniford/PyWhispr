@@ -19,7 +19,8 @@ def app(qtbot, qapp):
         recorder = recorder_cls.return_value
         recorder.recording = False
         recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
-        instance = PyWhisprApp(Config(play_sounds=False))
+        # api_enabled=False: these tests must not open a listening socket.
+        instance = PyWhisprApp(Config(play_sounds=False, api_enabled=False))
         instance._test_backend = backend
         instance._test_recorder = recorder
         yield instance
@@ -129,6 +130,39 @@ def test_transcription_error_recovers_to_idle(app, qtbot):
     app._on_toggle()
     wait_for_worker(app, qtbot)
     assert app.state == State.IDLE
+
+
+class TestNetworkApi:
+    def test_disabled_by_config(self, app):
+        assert app.api is None
+
+    def test_enabled_by_default(self, qtbot, qapp):
+        backend = MagicMock()
+        backend.name = "mock-backend"
+        with (
+            patch("pywhispr.app.create_backend", return_value=backend),
+            patch("pywhispr.app.AudioRecorder"),
+            patch("pywhispr.app.TrayIcon"),
+        ):
+            instance = PyWhisprApp(Config(play_sounds=False, api_host="127.0.0.1", api_port=0))
+        try:
+            assert instance.api is not None
+            assert instance.api.start()
+            assert instance._api_status()["status"] == "loading"
+            instance._on_model_ready()
+            assert instance._api_status()["status"] == "ready"
+
+            backend.transcribe.return_value = "remote text"
+            audio = np.zeros(16000, dtype=np.float32)
+            assert instance._api_transcribe(audio) == "remote text"
+            backend.transcribe.assert_called_once()
+        finally:
+            instance.api.stop()
+            instance._worker.shutdown(wait=True)
+
+    def test_status_reports_model_failure(self, app):
+        app._model_error = "download failed"
+        assert app._api_status()["status"] == "error"
 
 
 def test_max_duration_stops_recording(app, qtbot):

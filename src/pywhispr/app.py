@@ -12,12 +12,14 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
+from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.config import Config, load_config, save_config
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
 from pywhispr.stt import create_backend
+from pywhispr.stt.base import SAMPLE_RATE
 from pywhispr.tray import TrayIcon
 from pywhispr.ui.overlay import OverlayWindow
 
@@ -72,6 +74,23 @@ class PyWhisprApp(QObject):
             on_release=self._hotkey_released.emit,
         )
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
+        self._model_error: str | None = None
+
+        # Network API. Requests run on their own threads but hand the actual
+        # transcription to _worker, so the model is still only ever used by one
+        # thread at a time and remote work queues behind local dictation.
+        self.api = (
+            TranscriptionServer(
+                transcribe=self._api_transcribe,
+                status=self._api_status,
+                host=cfg.api_host,
+                port=cfg.api_port,
+                max_audio_seconds=cfg.api_max_audio_seconds,
+                max_queue=cfg.api_max_queue,
+            )
+            if cfg.api_enabled
+            else None
+        )
 
         # Push-to-talk bookkeeping: did the last activation start a recording,
         # and when. Set on activate, consumed on the activating key's release.
@@ -99,6 +118,11 @@ class PyWhisprApp(QObject):
     def start(self) -> None:
         self.tray.show()
         self.tray.set_status("Loading model…")
+        if self.api is not None and not self.api.start():
+            self.tray.notify(
+                "PyWhispr: network API off",
+                f"Port {self.cfg.api_port} is already in use. Dictation still works.",
+            )
         if not warn_if_missing_permissions():
             self.tray.notify("PyWhispr: clipboard mode", MACOS_PERMISSIONS_HELP)
         try:
@@ -121,6 +145,8 @@ class PyWhisprApp(QObject):
 
     def _quit(self) -> None:
         self.listener.stop()
+        if self.api is not None:
+            self.api.stop()  # before the worker, so no request is left orphaned
         if self.recorder.recording:
             self.recorder.stop()
         self._worker.shutdown(wait=False)
@@ -131,6 +157,29 @@ class PyWhisprApp(QObject):
         self.tray.notify("PyWhispr error", message)
         QTimer.singleShot(8000, self._quit)
 
+    # -- network API hooks (called on API request threads) --------------------
+
+    def _api_status(self) -> dict:
+        """Snapshot for /v1/health.
+
+        self.state is only ever written on the main thread, so an unsynchronised
+        read here can at worst be one instant stale — harmless, since the
+        backend itself rejects use before it is loaded.
+        """
+        if self._model_error is not None:
+            status = "error"
+        elif self.state == State.LOADING:
+            status = "loading"
+        else:
+            status = "ready"
+        return {"status": status, "backend": self.backend.name, "error": self._model_error}
+
+    def _api_transcribe(self, audio) -> str:
+        """Run a remote request on the single STT worker and wait for the text."""
+        return self._worker.submit(self.backend.transcribe, audio).result(
+            timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
+        )
+
     # -- state transitions (main thread only) --------------------------------
 
     def _on_model_ready(self) -> None:
@@ -139,6 +188,7 @@ class PyWhisprApp(QObject):
         log.info("Ready. Press %s to start/stop dictation.", self.cfg.hotkey)
 
     def _on_model_failed(self, message: str) -> None:
+        self._model_error = message
         self._fatal(f"Model failed to load: {message}")
 
     def _on_activate(self) -> None:

@@ -33,6 +33,13 @@ class Config:
     play_sounds: bool = True
     paste_delay_ms: int = 150
     clipboard_restore_delay_ms: int = 300
+    # Network transcription API. Open to the LAN with no authentication:
+    # set api_host to "127.0.0.1" to keep it on this machine only.
+    api_enabled: bool = True
+    api_host: str = "0.0.0.0"
+    api_port: int = 9149
+    api_max_audio_seconds: int = 300
+    api_max_queue: int = 4
 
 
 def config_path() -> Path:

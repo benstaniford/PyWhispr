@@ -9,6 +9,8 @@ typed into whatever app has focus.
 - **Fast** — NVIDIA Parakeet TDT 0.6B v3, sub-second transcription of typical dictation
 - **Cross-platform** — Apple Silicon Macs (via [MLX](https://github.com/ml-explore/mlx))
   and PCs with NVIDIA GPUs (via ONNX Runtime + CUDA), with CPU fallback
+- **Shareable** — an open [HTTP API](#network-api) lets phones, browsers and games on
+  your network use the same warm model
 
 ## Install
 
@@ -58,6 +60,122 @@ this. (On Windows, double-tap works without any special permission.)
 | `play_sounds` | `true` | Start/stop audio cues |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
 | `clipboard_restore_delay_ms` | `300` | Wait before restoring your old clipboard |
+| `api_enabled` | `true` | Serve the [network API](#network-api) |
+| `api_host` | `0.0.0.0` | Bind address — set to `127.0.0.1` to keep it on this machine |
+| `api_port` | `9149` | Listening port |
+| `api_max_audio_seconds` | `300` | Longest clip accepted per request |
+| `api_max_queue` | `4` | Requests in flight before new ones get `503 busy` |
+
+## Network API
+
+PyWhispr keeps the Parakeet model loaded the whole time it's running, so it can serve
+transcriptions to other devices for free. Phones, browsers, games and scripts on your
+network POST audio to `http://<your-machine>:9149` and get text back — no cloud, no API
+key, no per-minute billing.
+
+It only ever converts audio to text. It cannot start a recording on the host, read its
+microphone, or type anything into it.
+
+> **There is no authentication.** Anything that can reach port 9149 can spend your CPU
+> and GPU. That's fine on a home LAN; on a shared or untrusted network set
+> `api_host = "127.0.0.1"`, or `api_enabled = false` to close the port entirely.
+> Expect a firewall prompt on first launch (macOS "allow incoming connections", Windows
+> Defender Firewall) — the API is unreachable from other machines until you allow it.
+
+### `GET /v1/health`
+
+```json
+{
+  "status": "ready",
+  "version": "0.2.4",
+  "backend": "parakeet-mlx (mlx-community/parakeet-tdt-0.6b-v3)",
+  "sample_rate": 16000,
+  "max_audio_seconds": 300,
+  "max_upload_bytes": 38400000,
+  "queue_depth": 0,
+  "max_queue": 4,
+  "pcm_formats": ["f32le", "s16le"]
+}
+```
+
+`status` is `loading` while the model warms up (roughly the first 10 s, or minutes on a
+first run that downloads it), then `ready`. Poll this before sending audio.
+
+### `POST /v1/transcribe`
+
+Three body encodings, whichever suits your client:
+
+| `Content-Type` | Body |
+|---|---|
+| `audio/wav` | a complete wav file — 16-bit or 32-bit, any sample rate, mono or stereo |
+| `application/octet-stream` | headerless PCM, described by the query parameters below |
+| `multipart/form-data` | a form field named `audio` |
+
+Query parameters (raw PCM only): `sample_rate` (default `16000`), `channels`
+(default `1`), `format` — `f32le` (default) or `s16le`. Downmixing and resampling to
+16 kHz mono happen server-side. A wav is recognised by its `RIFF` header whatever
+content type you declare.
+
+```json
+{
+  "text": "hello world",
+  "backend": "parakeet-mlx (mlx-community/parakeet-tdt-0.6b-v3)",
+  "audio_seconds": 2.13,
+  "processing_seconds": 0.41
+}
+```
+
+Errors are `{"error": {"code": "...", "message": "..."}}` with a stable `code`:
+`model_loading` and `busy` (both 503, with `Retry-After`), `bad_audio` (400),
+`unsupported_media_type` (415), `payload_too_large` (413), `transcribe_failed` (500).
+
+Requests share the single STT worker with local dictation, so a request that arrives
+mid-dictation simply waits its turn. Beyond `api_max_queue` in flight you get `busy`
+rather than an unbounded backlog.
+
+**No codecs.** Wav and raw PCM only — no mp3, m4a or Opus. In particular the browser's
+`MediaRecorder` produces WebM/Opus, which won't work; use the Web Audio recipe below.
+
+### Clients
+
+```sh
+curl -s http://192.168.1.20:9149/v1/health
+curl -s -X POST http://192.168.1.20:9149/v1/transcribe \
+     -H 'Content-Type: audio/wav' --data-binary @clip.wav
+```
+
+CORS is open, so browsers can call it directly. Send float32 samples straight from an
+`AudioContext`:
+
+```js
+// buffer: an AudioBuffer captured via getUserMedia + AudioWorklet/ScriptProcessor
+const pcm = buffer.getChannelData(0);           // Float32Array
+const res = await fetch(
+  `http://192.168.1.20:9149/v1/transcribe?sample_rate=${buffer.sampleRate}&format=f32le`,
+  {method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: pcm},
+);
+const {text} = await res.json();
+```
+
+Unity / C#:
+
+```csharp
+var pcm = new byte[clip.samples * 4];
+var samples = new float[clip.samples];
+clip.GetData(samples, 0);
+Buffer.BlockCopy(samples, 0, pcm, 0, pcm.Length);
+
+var url = $"http://192.168.1.20:9149/v1/transcribe?sample_rate={clip.frequency}&format=f32le";
+using var req = new UnityWebRequest(url, "POST") {
+    uploadHandler = new UploadHandlerRaw(pcm) {contentType = "application/octet-stream"},
+    downloadHandler = new DownloadHandlerBuffer(),
+};
+yield return req.SendWebRequest();
+Debug.Log(req.downloadHandler.text);   // {"text": "...", ...}
+```
+
+Streaming (partial results over a WebSocket) isn't implemented; the `/v1` prefix leaves
+room to add it without breaking these clients.
 
 ## Corporate proxies / TLS interception
 
@@ -112,7 +230,9 @@ Architecture: `app.py` runs a small state machine (idle → recording → transc
 inserting) on the Qt main thread. The mic callback (PortAudio thread), hotkey listener
 (pynput thread) and STT worker all communicate via queued Qt signals. STT backends
 implement `stt/base.py::STTBackend` and take in-memory 16 kHz float32 numpy audio, so
-they're testable without a microphone.
+they're testable without a microphone. `api.py` is a stdlib `ThreadingHTTPServer` that
+funnels every request through that same single-worker executor, so the model is only
+ever used by one thread at a time.
 
 ## License
 
