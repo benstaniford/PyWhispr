@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from pywhispr.app import PyWhisprApp, State
+from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
 
 
@@ -35,6 +35,46 @@ def wait_for_worker(app, qtbot):
 
 def test_starts_in_loading_and_ignores_nothing_burger(app):
     assert app.state == State.LOADING
+
+
+class TestPushToTalk:
+    def _ready(self, app):
+        app._on_model_ready()
+        assert app.state == State.IDLE
+
+    def test_held_release_stops_recording(self, app):
+        self._ready(app)
+        app._on_activate()  # double-tap start
+        assert app.state == State.RECORDING
+        app._on_activation_key_released(PUSH_TO_TALK_HOLD_SECONDS + 0.2)  # held → stop
+        assert app.state == State.TRANSCRIBING
+
+    def test_quick_release_leaves_recording_latched(self, app):
+        self._ready(app)
+        app._on_activate()
+        app._on_activation_key_released(0.05)  # quick tap → stay recording
+        assert app.state == State.RECORDING
+
+    def test_release_after_stop_activation_does_not_restart(self, app):
+        # Double-tapping to STOP a latched recording, then holding, must not
+        # start a new recording on release.
+        self._ready(app)
+        app._on_activate()  # start (latched)
+        app._on_activation_key_released(0.05)
+        assert app.state == State.RECORDING
+        app._on_activate()  # second double-tap: stop
+        assert app.state == State.TRANSCRIBING
+        app._on_activation_key_released(PUSH_TO_TALK_HOLD_SECONDS + 0.5)
+        assert app.state == State.TRANSCRIBING  # not restarted
+
+    def test_release_after_external_stop_is_noop(self, app):
+        # Max-duration guard stops the recording before the key is released.
+        self._ready(app)
+        app._on_activate()
+        app._on_max_duration()
+        assert app.state == State.TRANSCRIBING
+        app._on_activation_key_released(PUSH_TO_TALK_HOLD_SECONDS + 1.0)
+        assert app.state == State.TRANSCRIBING  # release ignored, no restart
 
 
 def test_full_cycle(app, qtbot):

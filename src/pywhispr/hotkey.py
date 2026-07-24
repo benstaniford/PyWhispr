@@ -192,6 +192,38 @@ class DoubleTapState:
         self._last_tap = 0.0
 
 
+class DoubleTapGesture:
+    """Turns raw modifier press/release events into activate/release calls.
+
+    ``on_activate`` fires when a double-tap is detected (on the second press).
+    ``on_release`` fires when that second (activating) tap is released, with
+    how long it was held — letting the app offer push-to-talk: hold the second
+    tap and release to stop, or tap quickly to leave recording latched.
+    """
+
+    def __init__(self, on_activate, on_release, interval: float = DOUBLE_TAP_INTERVAL):
+        self._on_activate = on_activate
+        self._on_release = on_release
+        self._state = DoubleTapState(interval)
+        self._armed = False  # a double-tap fired; watching the activating tap's release
+        self._press_time = 0.0
+
+    def press(self, now: float, interrupted: bool = False) -> None:
+        if self._state.tap(now, interrupted):
+            self._armed = True
+            self._press_time = now
+            self._on_activate()
+
+    def release(self, now: float) -> None:
+        if self._armed:
+            self._armed = False
+            if self._on_release is not None:
+                self._on_release(now - self._press_time)
+
+    def interrupt(self) -> None:
+        self._state.interrupt()
+
+
 class DoubleTapListener(HotkeyListener):
     """Double-tap detection via pynput (Windows/Linux).
 
@@ -201,22 +233,31 @@ class DoubleTapListener(HotkeyListener):
     Carbon hotkey registration; MacDoubleTapListener is used there instead.
     """
 
-    def __init__(self, hotkey: str, on_toggle: Callable[[], None]):
+    def __init__(
+        self,
+        hotkey: str,
+        on_toggle: Callable[[], None],
+        on_release: Callable[[float], None] | None = None,
+    ):
         super().__init__(hotkey, on_toggle)
         self._token = _double_tap_token(hotkey)
         self._listener = None
-        self._state = DoubleTapState()
+        self._gesture = DoubleTapGesture(self._fire, on_release)
         self._held = False  # guards against OS key-repeat while held
 
     def _handle_press(self, is_target: bool, now: float) -> None:
         if not is_target:
-            self._state.interrupt()
+            self._gesture.interrupt()
             return
         if self._held:
             return
         self._held = True
-        if self._state.tap(now):
-            self._fire()
+        self._gesture.press(now)
+
+    def _handle_release(self, is_target: bool, now: float) -> None:
+        if is_target:
+            self._held = False
+            self._gesture.release(now)
 
     def start(self) -> None:
         from pynput import keyboard
@@ -231,8 +272,7 @@ class DoubleTapListener(HotkeyListener):
             self._handle_press(key in targets, time.monotonic())
 
         def on_release(key):
-            if key in targets:
-                self._held = False
+            self._handle_release(key in targets, time.monotonic())
 
         self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self._listener.start()
@@ -263,20 +303,27 @@ class MacDoubleTapListener(HotkeyListener):
     simply never fires (no crash).
     """
 
-    def __init__(self, hotkey: str, on_toggle: Callable[[], None]):
+    def __init__(
+        self,
+        hotkey: str,
+        on_toggle: Callable[[], None],
+        on_release: Callable[[float], None] | None = None,
+    ):
         super().__init__(hotkey, on_toggle)
         self._token = _double_tap_token(hotkey)
         self._flag = _NS_MODIFIER_FLAGS[self._token]
         self._monitor = None
-        self._state = DoubleTapState()
+        self._gesture = DoubleTapGesture(self._fire, on_release)
         self._was_down = False
 
     def _on_flags_changed(self, flags: int) -> None:
         target_down = bool(flags & self._flag)
         other_mods_down = bool(flags & _NS_MOD_MASK & ~self._flag)
+        now = time.monotonic()
         if target_down and not self._was_down:  # rising edge = a tap
-            if self._state.tap(time.monotonic(), interrupted=other_mods_down):
-                self._fire()
+            self._gesture.press(now, interrupted=other_mods_down)
+        elif not target_down and self._was_down:  # falling edge = release
+            self._gesture.release(now)
         self._was_down = target_down
 
     def start(self) -> None:
@@ -284,7 +331,7 @@ class MacDoubleTapListener(HotkeyListener):
 
         def handler(event):
             if event.type() == 10:  # NSEventTypeKeyDown: a normal key breaks the pair
-                self._state.interrupt()
+                self._gesture.interrupt()
             else:
                 self._on_flags_changed(int(event.modifierFlags()))
 
@@ -302,11 +349,21 @@ class MacDoubleTapListener(HotkeyListener):
             self._monitor = None
 
 
-def create_hotkey_listener(hotkey: str, on_toggle: Callable[[], None]) -> HotkeyListener:
+def create_hotkey_listener(
+    hotkey: str,
+    on_toggle: Callable[[], None],
+    on_release: Callable[[float], None] | None = None,
+) -> HotkeyListener:
+    """Build the right listener for ``hotkey``.
+
+    ``on_release(held_seconds)`` is invoked by double-tap listeners when the
+    activating (second) tap is released, enabling push-to-talk; other listener
+    types ignore it.
+    """
     if hotkey.startswith(DOUBLE_TAP_PREFIX):
         if sys.platform == "darwin":
-            return MacDoubleTapListener(hotkey, on_toggle)
-        return DoubleTapListener(hotkey, on_toggle)
+            return MacDoubleTapListener(hotkey, on_toggle, on_release)
+        return DoubleTapListener(hotkey, on_toggle, on_release)
     if sys.platform == "darwin":
         return MacHotkeyListener(hotkey, on_toggle)
     return PynputHotkeyListener(hotkey, on_toggle)

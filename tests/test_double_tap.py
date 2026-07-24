@@ -4,6 +4,7 @@ import pytest
 
 from pywhispr.hotkey import (
     DOUBLE_TAP_INTERVAL,
+    DoubleTapGesture,
     DoubleTapListener,
     DoubleTapState,
     MacDoubleTapListener,
@@ -40,6 +41,40 @@ class TestDoubleTapState:
         s.tap(10.0)
         assert s.tap(10.2) is True
         assert s.tap(10.3) is False  # pair consumed; this starts a new pair
+
+
+class TestDoubleTapGesture:
+    def _gesture(self):
+        events = []
+        g = DoubleTapGesture(
+            on_activate=lambda: events.append(("activate",)),
+            on_release=lambda held: events.append(("release", held)),
+        )
+        return g, events
+
+    def test_double_tap_activates_then_reports_release(self):
+        g, events = self._gesture()
+        g.press(10.0)  # first tap
+        g.release(10.05)  # first release — before activation, ignored
+        g.press(10.2)  # second tap → activate
+        g.release(10.9)  # activating key released after 0.7s held
+        assert events == [("activate",), ("release", pytest.approx(0.7))]
+
+    def test_release_before_activation_is_ignored(self):
+        g, events = self._gesture()
+        g.press(10.0)
+        g.release(10.05)
+        assert events == []
+
+    def test_quick_double_tap_reports_small_held(self):
+        g, events = self._gesture()
+        g.press(10.0)
+        g.release(10.05)
+        g.press(10.2)
+        g.release(10.25)  # released fast → held ~0.05
+        assert events[0] == ("activate",)
+        assert events[1][0] == "release"
+        assert events[1][1] < 0.1
 
 
 class TestPynputListener:

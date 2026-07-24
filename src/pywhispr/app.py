@@ -23,6 +23,10 @@ from pywhispr.ui.overlay import OverlayWindow
 
 log = logging.getLogger(__name__)
 
+# Holding a double-tap's second key at least this long makes it push-to-talk
+# (stop on release); a quicker double-tap latches recording instead.
+PUSH_TO_TALK_HOLD_SECONDS = 0.35
+
 
 class State(Enum):
     LOADING = auto()
@@ -41,6 +45,7 @@ class PyWhisprApp(QObject):
     """
 
     _hotkey_toggled = Signal()
+    _hotkey_released = Signal(float)  # double-tap activating key released; held seconds
     _mic_level = Signal(float)
     _model_ready = Signal()
     _model_failed = Signal(str)
@@ -61,8 +66,16 @@ class PyWhisprApp(QObject):
         )
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
-        self.listener = create_hotkey_listener(cfg.hotkey, on_toggle=self._hotkey_toggled.emit)
+        self.listener = create_hotkey_listener(
+            cfg.hotkey,
+            on_toggle=self._hotkey_toggled.emit,
+            on_release=self._hotkey_released.emit,
+        )
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
+
+        # Push-to-talk bookkeeping: did the last activation start a recording,
+        # and when. Set on activate, consumed on the activating key's release.
+        self._activation_started_recording = False
 
         self._max_duration_timer = QTimer(self)
         self._max_duration_timer.setSingleShot(True)
@@ -72,7 +85,8 @@ class PyWhisprApp(QObject):
         self._start_sound = self._load_sound("start.wav")
         self._stop_sound = self._load_sound("stop.wav")
 
-        self._hotkey_toggled.connect(self._on_toggle)
+        self._hotkey_toggled.connect(self._on_activate)
+        self._hotkey_released.connect(self._on_activation_key_released)
         self._mic_level.connect(self.overlay.on_level)
         self._model_ready.connect(self._on_model_ready)
         self._model_failed.connect(self._on_model_failed)
@@ -126,6 +140,28 @@ class PyWhisprApp(QObject):
 
     def _on_model_failed(self, message: str) -> None:
         self._fatal(f"Model failed to load: {message}")
+
+    def _on_activate(self) -> None:
+        """Hotkey pressed (chord, or the second tap of a double-tap)."""
+        self._activation_started_recording = self.state == State.IDLE
+        self._on_toggle()
+
+    def _on_activation_key_released(self, held_seconds: float) -> None:
+        """Double-tap activating key released.
+
+        If that activation started a recording and the key was *held* (rather
+        than quickly double-tapped), stop on release — push-to-talk. A quick
+        double-tap instead leaves recording latched until the next double-tap.
+        Querying self.state keeps this correct if the max-duration guard or an
+        error already ended the recording.
+        """
+        if (
+            self._activation_started_recording
+            and self.state == State.RECORDING
+            and held_seconds >= PUSH_TO_TALK_HOLD_SECONDS
+        ):
+            self._stop_recording()
+        self._activation_started_recording = False
 
     def _on_toggle(self) -> None:
         if self.state == State.LOADING:
@@ -213,7 +249,9 @@ class PyWhisprApp(QObject):
         if new_chord and new_chord != self.cfg.hotkey:
             old_chord = self.cfg.hotkey
             try:
-                self.listener = create_hotkey_listener(new_chord, self._hotkey_toggled.emit)
+                self.listener = create_hotkey_listener(
+                    new_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
+                )
                 self.listener.start()
                 self.cfg.hotkey = new_chord
                 save_config(self.cfg)
@@ -222,7 +260,9 @@ class PyWhisprApp(QObject):
             except Exception as exc:
                 log.exception("Could not register new hotkey")
                 self.tray.notify("Hotkey not changed", f"Could not register {new_chord!r}: {exc}")
-                self.listener = create_hotkey_listener(old_chord, self._hotkey_toggled.emit)
+                self.listener = create_hotkey_listener(
+                    old_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
+                )
                 self.listener.start()
         else:
             self.listener.start()
