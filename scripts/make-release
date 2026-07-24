@@ -31,8 +31,10 @@ echo "New version: $NEW_TAG"
 # dependency/requires-python versions are untouched).
 perl -pi -e "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
 perl -pi -e "s/^__version__ = \".*\"/__version__ = \"$NEW_VERSION\"/" src/pywhispr/__init__.py
+# Keep uv.lock in step, or the next `uv run` dirties the tree with the bump.
+UV_SYSTEM_CERTS=1 uv lock --offline 2>/dev/null || UV_SYSTEM_CERTS=1 uv lock
 
-git add pyproject.toml src/pywhispr/__init__.py
+git add pyproject.toml src/pywhispr/__init__.py uv.lock
 git commit -m "Release $NEW_TAG"
 git push origin HEAD
 
