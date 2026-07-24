@@ -13,7 +13,7 @@ from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
 from pywhispr.audio import AudioRecorder
-from pywhispr.config import Config, load_config
+from pywhispr.config import Config, load_config, save_config
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
@@ -54,7 +54,11 @@ class PyWhisprApp(QObject):
 
         self.backend = create_backend(cfg)
         self.overlay = OverlayWindow()
-        self.tray = TrayIcon(on_quit=self._quit, on_toggle=self._hotkey_toggled.emit)
+        self.tray = TrayIcon(
+            on_quit=self._quit,
+            on_toggle=self._hotkey_toggled.emit,
+            on_change_hotkey=self._change_hotkey,
+        )
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
         self.listener = create_hotkey_listener(cfg.hotkey, on_toggle=self._hotkey_toggled.emit)
@@ -193,6 +197,36 @@ class PyWhisprApp(QObject):
         self.overlay.hide_overlay()
         self.state = State.IDLE
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
+
+    def _change_hotkey(self) -> None:
+        """Tray menu: capture a new chord, save it, and re-register the listener."""
+        if self.state not in (State.IDLE, State.LOADING):
+            return
+        from pywhispr.ui.hotkey_dialog import HotkeyCaptureDialog
+
+        # Stop listening while the dialog is up so pressing the current chord
+        # inside it doesn't start a recording.
+        self.listener.stop()
+        new_chord = HotkeyCaptureDialog.capture(self.cfg.hotkey)
+
+        if new_chord and new_chord != self.cfg.hotkey:
+            old_chord = self.cfg.hotkey
+            try:
+                self.listener = create_hotkey_listener(new_chord, self._hotkey_toggled.emit)
+                self.listener.start()
+                self.cfg.hotkey = new_chord
+                save_config(self.cfg)
+                log.info("Hotkey changed to %s", new_chord)
+            except Exception as exc:
+                log.exception("Could not register new hotkey")
+                self.tray.notify("Hotkey not changed", f"Could not register {new_chord!r}: {exc}")
+                self.listener = create_hotkey_listener(old_chord, self._hotkey_toggled.emit)
+                self.listener.start()
+        else:
+            self.listener.start()
+
+        if self.state != State.LOADING:
+            self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
 
     # -- sounds --------------------------------------------------------------
 

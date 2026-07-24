@@ -153,3 +153,16 @@ def create_hotkey_listener(hotkey: str, on_toggle: Callable[[], None]) -> Hotkey
     if sys.platform == "darwin":
         return MacHotkeyListener(hotkey, on_toggle)
     return PynputHotkeyListener(hotkey, on_toggle)
+
+
+def validate_chord(hotkey: str) -> None:
+    """Raise ValueError if this platform's listener can't register the chord."""
+    if sys.platform == "darwin":
+        parse_mac_chord(hotkey)
+    else:
+        from pynput import keyboard
+
+        keyboard.HotKey.parse(hotkey)
+        tokens = [t.strip().lower() for t in hotkey.split("+")]
+        if not any(t in _MAC_MODIFIER_NAMES for t in tokens):
+            raise ValueError(f"Hotkey {hotkey!r} needs at least one modifier (cmd/ctrl/alt/shift)")

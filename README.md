@@ -71,7 +71,7 @@ You can also start/stop dictation from the tray icon menu — no hotkey needed a
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle chord ([pynput syntax](https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.HotKey); modifiers + a letter, digit, `<space>` or `<f1>`–`<f20>`) |
+| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle chord — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>` |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `max_recording_seconds` | `120` | Auto-stop guard |
