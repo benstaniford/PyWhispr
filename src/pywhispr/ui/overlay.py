@@ -1,0 +1,119 @@
+"""Frameless always-on-top overlay shown while recording/transcribing.
+
+Run ``python -m pywhispr.ui.overlay`` for a standalone demo with fake levels.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Slot
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
+
+from pywhispr.ui.waveform import WaveformWidget
+
+PILL_WIDTH = 280
+PILL_HEIGHT = 64
+BOTTOM_MARGIN = 48
+BACKGROUND = QColor(20, 20, 24, 235)
+
+
+class OverlayWindow(QWidget):
+    """Small pill at the bottom-center of the screen. Never takes focus —
+    stealing focus would make the final paste land in the overlay instead of
+    the user's app."""
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        self.setFixedSize(PILL_WIDTH, PILL_HEIGHT)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(24, 14, 24, 14)
+
+        self.waveform = WaveformWidget(self)
+        layout.addWidget(self.waveform)
+
+        self.status_label = QLabel(self)
+        self.status_label.setStyleSheet("color: white; font-size: 14px;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+        self.status_label.hide()
+
+    def _move_to_bottom_center(self) -> None:
+        screen = QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        x = geo.x() + (geo.width() - self.width()) // 2
+        y = geo.y() + geo.height() - self.height() - BOTTOM_MARGIN
+        self.move(x, y)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(BACKGROUND)
+        radius = self.height() / 2
+        painter.drawRoundedRect(self.rect(), radius, radius)
+
+    def show_recording(self) -> None:
+        self.status_label.hide()
+        self.waveform.show()
+        self.waveform.start()
+        self._move_to_bottom_center()
+        self.show()
+
+    def show_status(self, text: str) -> None:
+        """Swap the waveform for a short status message (e.g. 'Transcribing…')."""
+        self.waveform.stop()
+        self.waveform.hide()
+        self.status_label.setText(text)
+        self.status_label.show()
+        self._move_to_bottom_center()
+        self.show()
+
+    def hide_overlay(self) -> None:
+        self.waveform.stop()
+        self.hide()
+
+    @Slot(float)
+    def on_level(self, level: float) -> None:
+        self.waveform.push_level(level)
+
+
+def _demo() -> None:
+    """Standalone visual check: animates fake levels, then a status message."""
+    import math
+    import sys
+
+    from PySide6.QtCore import QTimer
+
+    app = QApplication(sys.argv)
+    overlay = OverlayWindow()
+    overlay.show_recording()
+
+    tick = 0
+
+    def fake_level():
+        nonlocal tick
+        tick += 1
+        overlay.on_level(abs(math.sin(tick / 3.0)) * 0.8 + 0.1)
+        if tick == 40:
+            overlay.show_status("Transcribing…")
+        if tick == 60:
+            overlay.hide_overlay()
+            app.quit()
+
+    timer = QTimer()
+    timer.timeout.connect(fake_level)
+    timer.start(100)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    _demo()
