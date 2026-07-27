@@ -71,6 +71,43 @@ word; `caret.py` finds `preceding`.
   `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
   `sys.modules` and made later tests pass for the wrong reason. Fake both.
 
+## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
+
+Parakeet takes no word list at decode time (`generate()` gets a mel and nothing
+else), so this is a **correction pass over the finished transcript**, applied
+before `join_text` — the join decides about the first word, so it has to see the
+corrected one. The API path gets it too: vocabulary is a standing preference
+about spelling, unlike joining, which needs a caret.
+
+- Storage is `vocabulary.txt` next to `config.toml`, **raw text as the source of
+  truth** so the user's comments and ordering survive the editor. Only a
+  *leading* `#` is a comment, so `C#` stays usable as a term.
+- Matching is on the **normalised** form (case, spaces, hyphens, punctuation all
+  stripped) over 1–4 word windows, longest first, exact tier before fuzzy tier.
+- The guards all lean the same way — a wrong substitution is worse than a missed
+  one, and every one of these came from a test that caught a real
+  misbehaviour:
+  - `MIN_KEY_LENGTH` — `C#` normalises to `c` and would rewrite every stray
+    letter c. Too-short terms are dropped; `c sharp => C#` is the way to say it.
+  - **Word counts must match for a fuzzy hit.** `a beyond-trust` is one edit
+    from `beyondtrust`, and the `a` is not ours to delete.
+  - `MIN_FUZZY_LENGTH` — at four characters, one edit reaches half of English
+    (`Jamf`/`jam`).
+  - `key.startswith(rule.key)` — `kubernetes clusters` is already right.
+  - Ties are dropped, and `CONTINUATION_WORDS` is reused as a
+    never-rewrite list. That list is function words, **not a dictionary**, so
+    fuzzy is best-effort by design; `vocabulary_fuzzy = false` is the out.
+- `app._corrected` wraps it like `app._joined`: the audio is gone, so a bug here
+  must degrade to the raw transcript. It can't use the join's "text untouched"
+  invariant (corrections rewrite words by definition), so the tripwire is a
+  length ratio.
+- **Never log the terms** — they are the user's private nouns (colleagues,
+  customers, unreleased products) and the log is what they send us. Line numbers
+  and counts only.
+- Testing gotcha: `PyWhisprApp.__init__` calls `load_vocabulary()`, which reads
+  the *developer's real* vocabulary file. The `app` fixture patches it (and
+  `create_hotkey_listener`, which was quietly claiming a real global hotkey).
+
 ## Debugging native crashes here
 
 - **`lldb` attach is blocked by MDM** and **ReportCrash is disabled** (no

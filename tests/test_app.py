@@ -5,6 +5,7 @@ import pytest
 
 from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
+from pywhispr.vocab import parse_vocabulary
 
 
 @pytest.fixture
@@ -15,6 +16,11 @@ def app(qtbot, qapp):
         patch("pywhispr.app.create_backend", return_value=backend),
         patch("pywhispr.app.AudioRecorder") as recorder_cls,
         patch("pywhispr.app.TrayIcon"),
+        # Never read the developer's own vocabulary file: tests that assert on
+        # exact transcripts would then depend on what is in it.
+        patch("pywhispr.app.load_vocabulary", return_value=[]),
+        # Nothing here should claim a real system-wide hotkey.
+        patch("pywhispr.app.create_hotkey_listener"),
     ):
         recorder = recorder_cls.return_value
         recorder.recording = False
@@ -173,6 +179,98 @@ class TestContinuationJoin:
         invalidate.assert_called_once()
 
 
+class TestVocabulary:
+    """Custom terms are corrected before the transcript is joined and pasted."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_corrects_the_transcript(self, app, qtbot):
+        app._vocab = parse_vocabulary("BeyondTrust")
+        insert = self._dictate(app, qtbot, "I work at beyond trust.")
+        insert.assert_called_once_with("I work at BeyondTrust.")
+
+    def test_disabled_by_config(self, app, qtbot):
+        app._vocab = parse_vocabulary("BeyondTrust")
+        app.cfg.vocabulary_enabled = False
+        insert = self._dictate(app, qtbot, "I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.")
+
+    def test_correction_happens_before_the_join(self, app, qtbot):
+        """The join decides about the first word, so it must see the fixed one."""
+        app.cfg.join_continuations = True
+        app._vocab = parse_vocabulary("BeyondTrust")
+        with patch.object(app._context, "preceding_text", return_value="I work at"):
+            insert = self._dictate(app, qtbot, "Beyond trust, mostly.")
+        insert.assert_called_once_with(" BeyondTrust, mostly.")
+
+    def test_a_broken_vocabulary_never_loses_the_transcript(self, app, qtbot):
+        app._vocab = parse_vocabulary("BeyondTrust")
+        with patch("pywhispr.app.apply_vocabulary", side_effect=RuntimeError("boom")):
+            insert = self._dictate(app, qtbot, "I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.")
+        assert app.state == State.INSERTING
+
+    def test_output_that_ran_away_is_rejected(self, app, qtbot):
+        app._vocab = parse_vocabulary("BeyondTrust")
+        with patch("pywhispr.app.apply_vocabulary", return_value="x"):
+            insert = self._dictate(app, qtbot, "I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.")
+
+    def test_the_api_gets_corrections_too(self, app):
+        app._vocab = parse_vocabulary("BeyondTrust")
+        app._test_backend.transcribe.return_value = "hello from beyond trust"
+        audio = np.zeros(16000, dtype=np.float32)
+        assert app._api_transcribe(audio) == "hello from BeyondTrust"
+
+    def test_editing_reloads_without_a_restart(self, app, tmp_path, qtbot):
+        path = tmp_path / "vocabulary.txt"
+        app._on_model_ready()
+        with (
+            patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit", return_value="BeyondTrust\n"),
+            patch("pywhispr.vocab.vocabulary_path", return_value=path),
+        ):
+            app._edit_vocabulary()
+        assert path.read_text(encoding="utf-8") == "BeyondTrust\n"
+        insert = self._dictate(app, qtbot, "I work at beyond trust.")
+        insert.assert_called_once_with("I work at BeyondTrust.")
+
+    def test_cancelling_changes_nothing(self, app, tmp_path):
+        path = tmp_path / "vocabulary.txt"
+        app._on_model_ready()
+        app._vocab = parse_vocabulary("BeyondTrust")
+        with (
+            patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit", return_value=None),
+            patch("pywhispr.vocab.vocabulary_path", return_value=path),
+        ):
+            app._edit_vocabulary()
+        assert not path.exists()
+        assert [rule.wanted for rule in app._vocab] == ["BeyondTrust"]
+
+    def test_the_listener_is_restarted_even_if_saving_fails(self, app):
+        app._on_model_ready()
+        with (
+            patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit", return_value="BeyondTrust"),
+            patch("pywhispr.vocab.save_vocabulary_text", side_effect=OSError("read-only")),
+        ):
+            app._edit_vocabulary()
+        app.listener.stop.assert_called_once()
+        app.listener.start.assert_called_once()
+        app.tray.notify.assert_called_once()
+
+    def test_ignored_while_a_dictation_is_in_flight(self, app):
+        app.state = State.TRANSCRIBING
+        with patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit") as edit:
+            app._edit_vocabulary()
+        edit.assert_not_called()
+
+
 class TestModelLoadFailure:
     """A failed load must leave a running, complaining app — not a vanished one."""
 
@@ -241,6 +339,7 @@ class TestNetworkApi:
             patch("pywhispr.app.create_backend", return_value=backend),
             patch("pywhispr.app.AudioRecorder"),
             patch("pywhispr.app.TrayIcon"),
+            patch("pywhispr.app.load_vocabulary", return_value=[]),
         ):
             instance = PyWhisprApp(Config(play_sounds=False, api_host="127.0.0.1", api_port=0))
         try:

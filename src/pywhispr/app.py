@@ -26,6 +26,7 @@ from pywhispr.stt import create_backend
 from pywhispr.stt.base import SAMPLE_RATE
 from pywhispr.tray import TrayIcon
 from pywhispr.ui.overlay import OverlayWindow
+from pywhispr.vocab import Rule, apply_vocabulary, load_vocabulary
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,11 @@ class PyWhisprApp(QObject):
             on_quit=self._quit,
             on_toggle=self._hotkey_toggled.emit,
             on_change_hotkey=self._change_hotkey,
+            on_edit_vocabulary=self._edit_vocabulary,
         )
+        # Rebound wholesale (never mutated) when the editor saves, so the API's
+        # request threads can read it without a lock.
+        self._vocab: list[Rule] = load_vocabulary()
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self._context = ContextTracker(
             max_chars=cfg.context_chars, memory_seconds=cfg.context_memory_seconds
@@ -210,13 +215,15 @@ class PyWhisprApp(QObject):
     def _api_transcribe(self, audio) -> str:
         """Run a remote request on the single STT worker and wait for the text.
 
-        Deliberately raw: continuation joining belongs to the local dictation
-        cycle, which has a caret to join onto. A remote caller has neither that
-        nor any session, so it gets exactly what the model said.
+        No continuation joining: that belongs to the local dictation cycle,
+        which has a caret to join onto. A remote caller has neither that nor
+        any session. The vocabulary does apply, because it is a standing
+        preference about how words are spelled rather than session state.
         """
-        return self._worker.submit(self.backend.transcribe, audio).result(
+        text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
+        return self._corrected(text)
 
     # -- state transitions (main thread only) --------------------------------
 
@@ -331,8 +338,34 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        self._last_inserted = self._joined(text)
+        # Vocabulary first: it can change the opening word, which is the word
+        # the join then decides about.
+        self._last_inserted = self._joined(self._corrected(text))
         self.injector.insert(self._last_inserted)
+
+    def _corrected(self, text: str) -> str:
+        """Apply the user's vocabulary to a finished transcript.
+
+        Wrapped for the same reason _joined is: by now the audio is gone, so a
+        bug in here has to degrade to the raw transcript rather than lose it.
+        """
+        if not text or not self.cfg.vocabulary_enabled or not self._vocab:
+            return text
+        try:
+            corrected = apply_vocabulary(text, self._vocab, fuzzy=self.cfg.vocabulary_fuzzy)
+        except Exception:
+            log.exception("Vocabulary pass failed; using the raw transcript")
+            return text
+        # A tripwire, not a proof: corrections rewrite words, so unlike the join
+        # we cannot check the text is untouched — only that none of it ran away.
+        if not corrected.strip() or not 0.5 <= len(corrected) / len(text) <= 2:
+            log.error(
+                "Vocabulary produced %d characters from %d; using the raw transcript",
+                len(corrected),
+                len(text),
+            )
+            return text
+        return corrected
 
     def _joined(self, text: str) -> str:
         """Adapt the transcript to what precedes the caret.
@@ -426,6 +459,38 @@ class PyWhisprApp(QObject):
 
         if self.state != State.LOADING:
             self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
+
+    def _edit_vocabulary(self) -> None:
+        """Tray menu: edit the custom vocabulary and apply it without a restart."""
+        if self.state not in (State.IDLE, State.LOADING):
+            return
+        from pywhispr.ui.vocab_dialog import VocabularyDialog
+        from pywhispr.vocab import (
+            TEMPLATE,
+            load_vocabulary_text,
+            parse_vocabulary,
+            save_vocabulary_text,
+        )
+
+        # The dialog takes focus, so what we remembered inserting is no longer
+        # behind the caret; and a dictation pasted into the editor helps nobody.
+        self._context.invalidate()
+        self.listener.stop()
+        try:
+            edited = VocabularyDialog.edit(load_vocabulary_text() or TEMPLATE)
+            if edited is not None:
+                save_vocabulary_text(edited)
+                self._vocab = parse_vocabulary(edited)
+                log.info("Vocabulary updated: %d term(s)", len(self._vocab))
+        except Exception as exc:
+            # Losing the edit is annoying; losing the tray app is worse.
+            log.exception("Could not save the vocabulary")
+            self.tray.notify("Vocabulary not saved", str(exc))
+        finally:
+            try:
+                self.listener.start()
+            except Exception:
+                log.exception("Could not restart the hotkey listener after editing vocabulary")
 
     def _check_double_tap_permission(self, chord: str) -> None:
         """Double-tap hotkeys need Input Monitoring on macOS; guide the user."""

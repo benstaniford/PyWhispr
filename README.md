@@ -68,6 +68,8 @@ this. (On Windows, double-tap works without any special permission.)
 | `lowercase_continuations` | `true` | Also lower-case the new text's first word when the sentence in front of the caret is unfinished |
 | `context_chars` | `64` | How many characters before the caret are read to decide the join |
 | `context_memory_seconds` | `90` | When the caret can't be read, how long PyWhispr trusts its memory of its own last insertion |
+| `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via tray menu → **Vocabulary…** |
+| `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `api_enabled` | `true` | Serve the [network API](#network-api) |
 | `api_host` | `0.0.0.0` | Bind address — set to `127.0.0.1` to keep it on this machine |
 | `api_port` | `9149` | Listening port |
@@ -105,6 +107,46 @@ Because this reads a few characters out of whatever window is focused, that text
 is **never written to the log** — only its length. Set `join_continuations = false`
 to turn the whole thing off, or `lowercase_continuations = false` to keep the
 spacing fix without the capitalisation change.
+
+## Custom vocabulary
+
+Product names, colleagues, codenames and jargon come out of any speech model
+spelled the way an ordinary English speaker would write them: *beyond trust*,
+*pie whisper*, *cubernetes*. Tray menu → **Vocabulary…** opens a list of terms,
+spelled the way you want them written:
+
+```
+BeyondTrust
+Kubernetes
+Endpoint Privilege Management
+Jamf
+
+# When the model mishears a word the same way every time, spell out the fix:
+pie whisper => PyWhispr
+c sharp => C#
+```
+
+Two things then happen to every transcript, local or [over the API](#network-api):
+
+- **Spacing and capitalisation are corrected.** *beyond trust*, *Beyond Trust*,
+  *beyondtrust* and *beyond-trust* all become *BeyondTrust*. This can't pick the
+  wrong word, so it applies to every term in the list.
+- **A near miss is corrected** on terms of five characters or more — *cubernetes*
+  and *kubernets* both become *Kubernetes*. Short terms are matched exactly only,
+  so listing *Jamf* never touches the word *jam*. Set `vocabulary_fuzzy = false`
+  to switch this tier off and keep only the first.
+
+The safeguards are deliberately lopsided, because a wrong substitution is worse
+than a missed one: the number of words has to agree, so a correction can never
+swallow the word next to it; a term plus an ordinary ending (*Kubernetes* →
+*kubernetes clusters*) is left alone; common joining words are never rewritten;
+and if two terms are equally close to what was said, neither is used.
+
+**What it can't do.** This is a correction pass over the finished transcript,
+not a hint to the model — nothing in Parakeet's decoder takes a word list — so a
+term the model didn't hear at all can only be recovered with an explicit
+`heard => wanted` line. The file lives next to `config.toml` as `vocabulary.txt`
+and is never written to the log, only its term count.
 
 ## Network API
 

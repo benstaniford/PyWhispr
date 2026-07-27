@@ -40,6 +40,11 @@ class Config:
     lowercase_continuations: bool = True
     context_chars: int = 64
     context_memory_seconds: int = 90
+    # Custom vocabulary: correct the transcript's spelling of terms listed in
+    # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
+    # near miss on longer terms; turn it off to only ever match them exactly.
+    vocabulary_enabled: bool = True
+    vocabulary_fuzzy: bool = True
     # Network transcription API. Open to the LAN with no authentication:
     # set api_host to "127.0.0.1" to keep it on this machine only.
     api_enabled: bool = True

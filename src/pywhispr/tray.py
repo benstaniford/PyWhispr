@@ -35,7 +35,14 @@ def _make_icon(active: bool = False) -> QIcon:
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, on_quit, on_toggle=None, on_change_hotkey=None, parent=None):
+    def __init__(
+        self,
+        on_quit,
+        on_toggle=None,
+        on_change_hotkey=None,
+        on_edit_vocabulary=None,
+        parent=None,
+    ):
         super().__init__(_make_icon(), parent)
         self._idle_icon = _make_icon(active=False)
         self._active_icon = _make_icon(active=True)
@@ -54,6 +61,10 @@ class TrayIcon(QSystemTrayIcon):
             change_hotkey = QAction("Change hotkey…", menu)
             change_hotkey.triggered.connect(on_change_hotkey)
             menu.addAction(change_hotkey)
+        if on_edit_vocabulary is not None:
+            vocabulary = QAction("Vocabulary…", menu)
+            vocabulary.triggered.connect(on_edit_vocabulary)
+            menu.addAction(vocabulary)
         open_config = QAction("Open config file", menu)
         open_config.triggered.connect(self._open_config)
         menu.addAction(open_config)
