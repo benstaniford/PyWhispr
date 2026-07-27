@@ -53,10 +53,9 @@ class TrayIcon(QSystemTrayIcon):
             toggle.triggered.connect(on_toggle)
             menu.addAction(toggle)
             menu.addSeparator()
-            # On Windows a plain left-click toggles too (macOS opens the menu).
-            self.activated.connect(
-                lambda reason: reason == QSystemTrayIcon.ActivationReason.Trigger and on_toggle()
-            )
+            # Deliberately no `activated` handler: clicking the icon must only
+            # open the menu. A stray click that silently starts recording is
+            # worse than one that does nothing.
         if on_change_hotkey is not None:
             change_hotkey = QAction("Change hotkey…", menu)
             change_hotkey.triggered.connect(on_change_hotkey)
