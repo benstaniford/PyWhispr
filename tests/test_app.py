@@ -20,7 +20,12 @@ def app(qtbot, qapp):
         recorder.recording = False
         recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
         # api_enabled=False: these tests must not open a listening socket.
-        instance = PyWhisprApp(Config(play_sounds=False, api_enabled=False))
+        # join_continuations=False: these tests are about the state machine, so
+        # transcripts should reach the injector exactly as the backend said them.
+        # TestContinuationJoin below turns it back on.
+        instance = PyWhisprApp(
+            Config(play_sounds=False, api_enabled=False, join_continuations=False)
+        )
         instance._test_backend = backend
         instance._test_recorder = recorder
         yield instance
@@ -96,6 +101,76 @@ def test_full_cycle(app, qtbot):
 
     app.injector.finished.emit(True)
     assert app.state == State.IDLE
+
+
+class TestContinuationJoin:
+    """Dictating twice in a row should read as one passage."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_joins_onto_the_caret_context(self, app, qtbot):
+        app.cfg.join_continuations = True
+        with patch.object(app._context, "preceding_text", return_value="I went to the shop"):
+            insert = self._dictate(app, qtbot, "Then I came home.")
+        insert.assert_called_once_with(" then I came home.")
+
+    def test_full_stop_keeps_the_capital(self, app, qtbot):
+        app.cfg.join_continuations = True
+        with patch.object(app._context, "preceding_text", return_value="I went to the shop."):
+            insert = self._dictate(app, qtbot, "Then I came home.")
+        insert.assert_called_once_with(" Then I came home.")
+
+    def test_no_context_inserts_verbatim(self, app, qtbot):
+        app.cfg.join_continuations = True
+        with patch.object(app._context, "preceding_text", return_value=None):
+            insert = self._dictate(app, qtbot, "Then I came home.")
+        insert.assert_called_once_with("Then I came home.")
+
+    def test_a_broken_join_never_loses_the_transcript(self, app, qtbot):
+        """The audio is gone by now, so a failure here must still paste the text
+        and must still return the app to IDLE — a stuck INSERTING state would
+        ignore every subsequent hotkey."""
+        app.cfg.join_continuations = True
+        with patch.object(
+            app._context, "preceding_text", side_effect=RuntimeError("accessibility exploded")
+        ):
+            insert = self._dictate(app, qtbot, "Then I came home.")
+        insert.assert_called_once_with("Then I came home.")
+        assert app.state == State.INSERTING
+        app.injector.finished.emit(True)
+        assert app.state == State.IDLE
+
+    def test_output_violating_the_contract_is_rejected(self, app, qtbot):
+        app.cfg.join_continuations = True
+        with (
+            patch.object(app._context, "preceding_text", return_value="context"),
+            patch("pywhispr.app.join_text", return_value="something else entirely"),
+        ):
+            insert = self._dictate(app, qtbot, "Then I came home.")
+        insert.assert_called_once_with("Then I came home.")
+
+    def test_pasted_text_is_remembered_but_clipboard_only_is_not(self, app):
+        with patch.object(app._context, "remember") as remember:
+            app._last_inserted = " then I came home."
+            app._on_insert_finished(True)
+        remember.assert_called_once_with(" then I came home.")
+
+        with patch.object(app._context, "invalidate") as invalidate:
+            app._last_inserted = " then I came home."
+            app._on_insert_finished(False)
+        invalidate.assert_called_once()
+
+    def test_failed_transcription_invalidates_context(self, app):
+        with patch.object(app._context, "invalidate") as invalidate:
+            app._on_transcribe_failed("boom")
+        invalidate.assert_called_once()
 
 
 class TestModelLoadFailure:

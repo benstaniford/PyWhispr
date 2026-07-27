@@ -15,9 +15,11 @@ from PySide6.QtWidgets import QApplication
 
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
+from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, load_config, save_config
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
+from pywhispr.join import join_text
 from pywhispr.logging_setup import log_environment, log_path
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
 from pywhispr.stt import create_backend
@@ -70,6 +72,10 @@ class PyWhisprApp(QObject):
             on_change_hotkey=self._change_hotkey,
         )
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
+        self._context = ContextTracker(
+            max_chars=cfg.context_chars, memory_seconds=cfg.context_memory_seconds
+        )
+        self._last_inserted: str | None = None
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
         self.listener = create_hotkey_listener(
             cfg.hotkey,
@@ -202,7 +208,12 @@ class PyWhisprApp(QObject):
         return {"status": status, "backend": self.backend.name, "error": self._model_error}
 
     def _api_transcribe(self, audio) -> str:
-        """Run a remote request on the single STT worker and wait for the text."""
+        """Run a remote request on the single STT worker and wait for the text.
+
+        Deliberately raw: continuation joining belongs to the local dictation
+        cycle, which has a caret to join onto. A remote caller has neither that
+        nor any session, so it gets exactly what the model said.
+        """
         return self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
@@ -320,15 +331,51 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        self.injector.insert(text)
+        self._last_inserted = self._joined(text)
+        self.injector.insert(self._last_inserted)
+
+    def _joined(self, text: str) -> str:
+        """Adapt the transcript to what precedes the caret.
+
+        Wrapped whole, because losing a transcript is unrecoverable — the audio
+        is already gone. Any failure in here, including one inside join_text,
+        falls back to the raw text rather than propagating: an exception
+        escaping _on_transcribed would strand the app in INSERTING, where
+        injector.finished never fires and every hotkey is ignored.
+        """
+        if not self.cfg.join_continuations:
+            return text
+        try:
+            preceding = self._context.preceding_text()
+            joined = join_text(
+                preceding, text, lowercase_continuations=self.cfg.lowercase_continuations
+            )
+        except Exception:
+            log.exception("Continuation join failed; inserting verbatim")
+            return text
+        # join_text promises "at most one extra leading character, everything
+        # from text[1] onward untouched". Checking it here means a bug in there
+        # can only ever degrade to today's behaviour.
+        if not (joined.endswith(text[1:]) and 0 <= len(joined) - len(text) <= 1):
+            log.error("Join produced unexpected output (%d chars); inserting verbatim", len(joined))
+            return text
+        return joined
 
     def _on_transcribe_failed(self, message: str) -> None:
         log.error("Transcription failed: %s", message)
         self.tray.notify("Transcription failed", message)
+        self._context.invalidate()
         self._finish_cycle()
 
     def _on_insert_finished(self, auto_pasted: bool) -> None:
         log.debug("Insertion finished (auto_pasted=%s)", auto_pasted)
+        if auto_pasted and self._last_inserted is not None:
+            self._context.remember(self._last_inserted)
+        else:
+            # Clipboard-only mode: nothing entered the document, so there is no
+            # caret to join onto next time — and whatever we remembered before
+            # is no longer what the caret sits after either.
+            self._context.invalidate()
         if not auto_pasted:
             paste_key = "Cmd+V" if sys.platform == "darwin" else "Ctrl+V"
             self.tray.notify(
@@ -337,6 +384,7 @@ class PyWhisprApp(QObject):
         self._finish_cycle()
 
     def _finish_cycle(self) -> None:
+        self._last_inserted = None
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
@@ -347,6 +395,9 @@ class PyWhisprApp(QObject):
             return
         from pywhispr.ui.hotkey_dialog import HotkeyCaptureDialog
 
+        # The dialog takes focus, so whatever we remembered inserting is no
+        # longer behind the caret.
+        self._context.invalidate()
         # Stop listening while the dialog is up so pressing the current chord
         # inside it doesn't start a recording.
         self.listener.stop()

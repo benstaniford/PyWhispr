@@ -64,11 +64,47 @@ this. (On Windows, double-tap works without any special permission.)
 | `play_sounds` | `true` | Start/stop audio cues |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
 | `clipboard_restore_delay_ms` | `300` | Wait before restoring your old clipboard |
+| `join_continuations` | `true` | Add the missing space when you dictate again straight after a previous dictation — see [Continuation joining](#continuation-joining) |
+| `lowercase_continuations` | `true` | Also lower-case the new text's first word when the sentence in front of the caret is unfinished |
+| `context_chars` | `64` | How many characters before the caret are read to decide the join |
+| `context_memory_seconds` | `90` | When the caret can't be read, how long PyWhispr trusts its memory of its own last insertion |
 | `api_enabled` | `true` | Serve the [network API](#network-api) |
 | `api_host` | `0.0.0.0` | Bind address — set to `127.0.0.1` to keep it on this machine |
 | `api_port` | `9149` | Listening port |
 | `api_max_audio_seconds` | `300` | Longest clip accepted per request |
 | `api_max_queue` | `4` | Requests in flight before new ones get `503 busy` |
+
+## Continuation joining
+
+Each recording is transcribed on its own, so the model capitalises the first word
+and adds a full stop every time. Say something in two goes and the halves used to
+collide: *"I went to the shop.Then I came home."*
+
+PyWhispr now looks at what is immediately before the cursor and adapts the new
+text to it:
+
+- **Missing space** — inserts one, so a full stop is followed by a space.
+- **Unfinished sentence** — if the text before the cursor has no `.`, `!` or `?`,
+  the new text's first word is lower-cased, so *"I went to the shop"* + *"And then
+  came home."* reads as one sentence. Only common joining words (*and*, *but*,
+  *which*, *because*, *the*…) are ever lower-cased, so names like *Ben* and
+  *March* keep their capital.
+- **A full stop is taken as deliberate** — the capital after it is left alone.
+
+**It never edits or deletes text that is already in your document.** At most it
+adds one leading space and changes one letter of the text it is about to paste.
+
+On macOS the cursor position is read through the Accessibility API — the same
+permission auto-pasting already needs, so nothing extra is requested. Plenty of
+apps don't expose it (Electron apps like Slack and VS Code, Java apps, terminals);
+there PyWhispr falls back to remembering what it inserted last, forgetting it as
+soon as you switch app or after `context_memory_seconds`. On Windows only the
+memory fallback is used.
+
+Because this reads a few characters out of whatever window is focused, that text
+is **never written to the log** — only its length. Set `join_continuations = false`
+to turn the whole thing off, or `lowercase_continuations = false` to keep the
+spacing fix without the capitalisation change.
 
 ## Network API
 

@@ -33,6 +33,13 @@ class Config:
     play_sounds: bool = True
     paste_delay_ms: int = 150
     clipboard_restore_delay_ms: int = 300
+    # Continuation joining: make consecutive dictations read as one passage.
+    # Only ever adds a space or lower-cases the new text — never edits what is
+    # already in the document.
+    join_continuations: bool = True
+    lowercase_continuations: bool = True
+    context_chars: int = 64
+    context_memory_seconds: int = 90
     # Network transcription API. Open to the LAN with no authentication:
     # set api_host to "127.0.0.1" to keep it on this machine only.
     api_enabled: bool = True

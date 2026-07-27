@@ -38,6 +38,39 @@ app; `pywhispr diagnose` reproduces startup in a terminal with output visible.
 exits is indistinguishable from a crash — report the error in the tray tooltip,
 the overlay and the log, and stay running.
 
+## Continuation joining (`join.py` + `caret.py`)
+
+Each recording is transcribed alone, so the model capitalises and adds a full
+stop every time and consecutive dictations collide. `join.py` is a pure
+`(preceding, text) -> str` that adds a space and lower-cases a continuation
+word; `caret.py` finds `preceding`.
+
+- **Only ever additive.** `join_text` returns exactly `("" | " ") + text` with at
+  most the first letter re-cased — never Backspace, never an edit to text
+  already in the document. `app._joined` re-checks that invariant and falls back
+  to the raw transcript, because losing a transcript is unrecoverable (the audio
+  is gone) and an exception escaping `_on_transcribed` strands the app in
+  `INSERTING` where no hotkey works.
+- Lower-casing is gated on a **closed list** of function words, not a
+  shape heuristic: an unlisted word keeps its capital (today's behaviour),
+  whereas a loose rule produces `ben`/`monday`. One-letter words are filtered
+  out of the list so `I` is safe structurally.
+- **Import `HIServices`, not `ApplicationServices`** — every AX symbol is in the
+  former; the umbrella drags in CoreText for nothing. pyobjc is already a
+  transitive dep of pynput, so no new dependency and no spec change.
+- AX reads need Accessibility (the grant auto-paste already has), so they only
+  work **from the bundle** — `AXIsProcessTrusted()` is False for a CLI `python`.
+  Set `AXUIElementSetMessagingTimeout`: AX is synchronous IPC on the GUI thread,
+  and a wedged Electron app would otherwise freeze the tray.
+- Plenty of apps expose no caret (Electron, Java, terminals). That is the
+  everyday case, not an error: debug-level only, fall back to memory.
+- **Never log the context text** — it is whatever window is focused, possibly a
+  password field. Lengths only.
+- Testing gotcha: `patch.dict(sys.modules, ...)` restores by wiping the dict, so
+  anything imported for real *inside* the patch is deleted on exit. Faking
+  `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
+  `sys.modules` and made later tests pass for the wrong reason. Fake both.
+
 ## Debugging native crashes here
 
 - **`lldb` attach is blocked by MDM** and **ReportCrash is disabled** (no

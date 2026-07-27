@@ -17,6 +17,10 @@ def test_round_trip(tmp_path):
         max_recording_seconds=60,
         play_sounds=False,
         paste_delay_ms=200,
+        join_continuations=False,
+        lowercase_continuations=False,
+        context_chars=32,
+        context_memory_seconds=30,
     )
     save_config(cfg, path)
     assert load_config(path) == cfg
