@@ -1,3 +1,3 @@
 """PyWhispr: local, hotkey-driven voice dictation."""
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
