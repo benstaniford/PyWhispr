@@ -290,15 +290,38 @@ pywhispr diagnose    # environment report, mic check, model load, test transcrib
 
 ## Corporate proxies / TLS interception
 
-If model downloads fail with certificate errors (common behind corporate TLS
-inspection), point Python at a CA bundle that includes your organisation's root
-certificate:
+On a network that inspects TLS (Cloudflare Gateway, Zscaler and the like), the
+first-run model download would otherwise fail with `CERTIFICATE_VERIFY_FAILED`:
+your machine trusts the intercepting CA, but Python verifies against certifi's
+bundled list, which can never contain a private CA.
+
+PyWhispr handles this itself. At startup it routes TLS verification through the
+operating system's own trust store — Schannel on Windows, SecTrust on macOS,
+OpenSSL's configured paths on Linux — so whatever the machine trusts, PyWhispr
+trusts. No certificate is bundled or pinned, so this works for any corporate CA
+and survives cert rotation. `pywhispr diagnose` reports which CA set is in force:
+
+```
+tls verification: system trust store (truststore)
+```
+
+That covers the normal case, where the CA is installed machine-wide (it has to
+be, or browsers on the machine would fail too). To override it — an unusual CA
+that isn't in the system store, or verification you want to pin explicitly —
+set a CA bundle and PyWhispr will leave verification alone:
 
 ```sh
 export SSL_CERT_FILE=/path/to/ca-bundle.pem REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem
 ```
 
-For `uv` itself, use `export UV_SYSTEM_CERTS=1`.
+Set both: they cover different HTTP stacks. `SSL_CERT_FILE` is read by Python's
+`ssl` module and so covers `httpx`, which is what `huggingface_hub` downloads
+with; `REQUESTS_CA_BUNDLE` is honoured only by `requests`.
+
+For `uv` itself, use `export UV_SYSTEM_CERTS=1` — that's a separate Rust/rustls
+path which the above doesn't affect.
+
+Once the model is cached, none of this matters: PyWhispr runs offline.
 
 ## Building a macOS app bundle
 

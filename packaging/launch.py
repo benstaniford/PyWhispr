@@ -15,8 +15,13 @@ log_file = setup_logging()
 
 import logging  # noqa: E402
 
+from pywhispr.certs import use_system_certificates  # noqa: E402
+
 logging.getLogger(__name__).info(
-    "Frozen launch: log=%s, stdio=%s", log_file, stdio_path or "console"
+    "Frozen launch: log=%s, stdio=%s, tls=%s",
+    log_file,
+    stdio_path or "console",
+    use_system_certificates(),
 )
 
 from pywhispr.app import run_app  # noqa: E402

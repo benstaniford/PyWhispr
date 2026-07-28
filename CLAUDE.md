@@ -16,10 +16,15 @@ STT backends take in-memory numpy audio, so they're testable without a mic.
 
 ## This machine is corporate-managed (Jamf MDM) — expect friction
 
-- **TLS interception breaks downloads.** Use `UV_SYSTEM_CERTS=1` for `uv`. For
-  Python/HuggingFace model downloads, build a CA bundle (certifi + system
-  keychain certs) and set `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`. Once the
-  model is cached, normal runs work offline.
+- **TLS interception breaks downloads.** Use `UV_SYSTEM_CERTS=1` for `uv` (its
+  own rustls path — nothing in the app affects it). The app itself handles it:
+  `certs.py` calls `truststore.inject_into_ssl()` at startup, so verification
+  goes to the OS trust store where the corporate CA already lives. Only reach
+  for a hand-built CA bundle if that fails — and note **which var matters
+  depends on the stack**: `httpx` (what `huggingface_hub` downloads with) reads
+  `SSL_CERT_FILE` and ignores `REQUESTS_CA_BUNDLE`; `requests` is the reverse.
+  Setting either makes `certs.py` stand aside. Once the model is cached, normal
+  runs work offline.
 - **Python 3.12**, not newer: `parakeet-mlx` → `librosa`/`numba` need a numpy
   the newest CPython lacks wheels for. `pyproject.toml` caps `<3.14` and pins
   `numba>=0.61` to stop bad backtracking.

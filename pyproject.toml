@@ -13,6 +13,9 @@ dependencies = [
     "platformdirs>=4",
     "tomli-w>=1",
     "huggingface-hub>=0.30",
+    # Verify TLS against the OS trust store so model downloads survive
+    # corporate TLS inspection (see pywhispr/certs.py).
+    "truststore>=0.10",
     # STT backends, gated per platform
     "quickmachotkey>=2025.7 ; sys_platform == 'darwin'",
     "parakeet-mlx>=0.5 ; sys_platform == 'darwin' and platform_machine == 'arm64'",

@@ -1,10 +1,14 @@
 # PyInstaller spec for the macOS app bundle.
 # Build with:  uv run --with pyinstaller pyinstaller packaging/pywhispr.spec
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [("../src/pywhispr/assets", "pywhispr/assets")]
 binaries = []
-hiddenimports = []
+# truststore is imported lazily inside pywhispr.certs, so nothing in the graph
+# points at it; without this the bundle silently loses the OS trust store and
+# falls back to certifi (i.e. no model download behind TLS inspection). Collect
+# the submodules too — the backends sit behind sys.platform conditionals.
+hiddenimports = collect_submodules("truststore")
 
 # mlx ships a compiled core + metal shader library; parakeet_mlx and librosa
 # have data files and lazy imports that static analysis misses.

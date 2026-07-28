@@ -50,6 +50,10 @@ def main(argv: list[str] | None = None) -> int:
 
     log_file = setup_logging(verbose=args.verbose or None)
 
+    from pywhispr.certs import use_system_certificates
+
+    use_system_certificates()
+
     command = args.command or "run"
     if log_file is not None:
         log.debug("Logging to %s", log_file)

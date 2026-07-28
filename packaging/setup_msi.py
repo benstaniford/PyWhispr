@@ -17,9 +17,12 @@ from pywhispr import __version__  # noqa: E402
 build_exe_options = {
     # pynput must be forced in whole: it loads its _win32 backend via a
     # string-built importlib call that cx_Freeze's scanner can't trace.
-    # pynput must be forced in whole: it loads its _win32 backend via a
-    # string-built importlib call that cx_Freeze's scanner can't trace.
-    "packages": ["pywhispr", "onnx_asr", "onnxruntime", "pynput", "_sounddevice_data"],
+    # truststore is imported lazily inside pywhispr.certs, so the scanner never
+    # sees it; leaving it out costs the OS trust store and, behind corporate TLS
+    # inspection, the first-run model download.
+    "packages": [
+        "pywhispr", "onnx_asr", "onnxruntime", "pynput", "_sounddevice_data", "truststore",
+    ],
     # Keep pywhispr as real files so importlib.resources finds assets/.
     # _sounddevice_data must also stay unzipped: sounddevice dlopens the
     # portaudio DLL from that package's directory.

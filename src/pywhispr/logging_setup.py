@@ -276,6 +276,16 @@ def _network_env_lines() -> list[str]:
     return ["environment:"] + [f"  {k}={v}" for k, v in found.items()]
 
 
+def _tls_verification_lines() -> list[str]:
+    """Which CA set TLS is verified against — the other half of a failed download."""
+    try:
+        from pywhispr.certs import trust_store_status
+
+        return [f"tls verification: {trust_store_status()}"]
+    except Exception as exc:
+        return [f"tls verification: unknown ({exc!r})"]
+
+
 def environment_report() -> list[str]:
     """Everything worth knowing about this machine, as loggable lines."""
     from pywhispr.config import config_path
@@ -299,6 +309,7 @@ def environment_report() -> list[str]:
     lines += _onnxruntime_lines()
     lines += _model_cache_lines()
     lines += _network_env_lines()
+    lines += _tls_verification_lines()
     return lines
 
 
