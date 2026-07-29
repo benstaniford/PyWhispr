@@ -156,5 +156,16 @@ upgrade depends on it).
 - `pywhispr.spec` — PyInstaller, menu-bar-only (`LSUIElement`), ad-hoc signed.
   **`mlx.metallib` must be copied next to the relocated `libmlx.dylib`** or MLX
   crashes on load ("Failed to load the default metallib").
+- `setup_msi.py` — cx_Freeze, per-user (no admin). Autostart is an HKCU `Run`
+  value in a **component of our own**: the executable's component id comes from
+  cx_Freeze internals (`make_id(f"_cx_executable{idx}_{executable}")`), and CI
+  installs whatever cx_Freeze is current, so borrowing it would break silently.
+  Ours carries a fixed GUID, the registry value as its key path, and a
+  `AUTOSTART<>"0"` condition so the MSI can be run without it. Launch-on-finish
+  is cx_Freeze's own `launch_on_finish` option. None of this can be built or
+  tested off Windows — `msilib` is Windows-only, so `bdist_msi.finalize_options`
+  refuses to run; the most you can check locally is that the option names and
+  emitted table rows are right (stub `HAS_MSILIB`/`add_data` and call
+  `add_config`).
 - `make_icns.sh` / `PyWhispr.ico` — icons; `scripts/make_icon.py` regenerates
   the base PNG (background removal + speech bubble).

@@ -16,6 +16,12 @@ typed into whatever app has focus.
 
 Just downlaod the latest [release]( https://github.com/benstaniford/PyWhispr/releases) for Mac / Windows and run the installer.
 
+On Windows the installer offers to start PyWhispr as soon as it finishes, and registers
+it to run automatically when you log on — a tray app is only useful if it's already
+there when you reach for the hotkey. To turn the autostart off afterwards, use **Task
+Manager → Startup apps**; to skip it at install time, run the MSI with
+`msiexec /i PyWhispr-<tag>-windows-x64.msi AUTOSTART=0`. Uninstalling removes it.
+
 ## macOS permissions
 
 PyWhispr works with **zero permission grants** out of the box: the global hotkey uses
@@ -341,7 +347,8 @@ microphone prompt shows "PyWhispr" instead of your terminal's name.
 Pushing a tag like `v0.2.0` triggers GitHub Actions to build and attach to the release:
 
 - `PyWhispr-<tag>-macos-arm64.zip` — the `.app` bundle (PyInstaller, ad-hoc signed)
-- `PyWhispr-<tag>-windows-x64.msi` — per-user installer (cx_Freeze), no admin required
+- `PyWhispr-<tag>-windows-x64.msi` — per-user installer (cx_Freeze), no admin required,
+  with a launch-on-finish checkbox and an HKCU `Run` entry for autostart
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
