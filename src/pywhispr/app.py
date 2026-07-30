@@ -73,7 +73,10 @@ class PyWhisprApp(QObject):
             on_toggle=self._hotkey_toggled.emit,
             on_change_hotkey=self._change_hotkey,
             on_edit_vocabulary=self._edit_vocabulary,
+            on_enable_gpu=self._enable_gpu,
         )
+        self._gpu_dialog = None  # kept alive while the download runs
+        self._download_dialog = None
         # Rebound wholesale (never mutated) when the editor saves, so the API's
         # request threads can read it without a lock.
         self._vocab: list[Rule] = load_vocabulary()
@@ -174,7 +177,24 @@ class PyWhisprApp(QObject):
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
         log.info("Loading %s (first run downloads the model, ~600 MB)...", self.backend.name)
+        self._show_model_download()
         self._worker.submit(load)
+
+    def _show_model_download(self) -> None:
+        """On a first run, show the download rather than a silent "Loading…"."""
+        from pywhispr.download import model_cached
+
+        if model_cached():
+            return
+        from pywhispr.ui.download_dialog import ModelDownloadDialog
+
+        self._download_dialog = ModelDownloadDialog()
+        self._download_dialog.show()
+
+    def _finish_model_download(self, message: str | None = None) -> None:
+        if self._download_dialog is not None:
+            self._download_dialog.finish(message)
+            self._download_dialog = None
 
     def _quit(self) -> None:
         log.info("Quitting")
@@ -240,9 +260,51 @@ class PyWhisprApp(QObject):
         self.state = state
 
     def _on_model_ready(self) -> None:
+        self._finish_model_download()
         self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
         log.info("Ready. Press %s to start/stop dictation.", self.cfg.hotkey)
+        QTimer.singleShot(0, self._maybe_offer_gpu)
+
+    # -- GPU acceleration ----------------------------------------------------
+
+    def _maybe_offer_gpu(self) -> None:
+        """Offer the CUDA download once, if this machine would benefit."""
+        from pywhispr.cuda import can_offer
+        from pywhispr.stt.onnx_backend import session_providers
+
+        if not self.cfg.offer_gpu_setup:
+            return
+        providers = session_providers(getattr(self.backend, "_model", None))
+        if any(p != "CPUExecutionProvider" for p in providers):
+            return  # already accelerated
+        worth_it, why_not = can_offer()
+        if not worth_it:
+            log.debug("Not offering GPU acceleration: %s", why_not)
+            return
+        self._enable_gpu(asked_by_user=False)
+
+    def _enable_gpu(self, asked_by_user: bool = True) -> None:
+        from pywhispr.cuda import can_offer, is_installed
+        from pywhispr.ui.gpu_dialog import ask_to_enable, run_setup
+
+        if self._gpu_dialog is not None and self._gpu_dialog.isVisible():
+            self._gpu_dialog.raise_()
+            return
+        worth_it, why_not = can_offer()
+        if asked_by_user and not worth_it and not is_installed():
+            self.tray.notify("GPU acceleration not available", why_not)
+            return
+
+        answer = ask_to_enable()
+        if answer is None:
+            self.cfg.offer_gpu_setup = False
+            save_config(self.cfg)
+            log.info("GPU acceleration declined for good")
+            return
+        if not answer:
+            return
+        self._gpu_dialog = run_setup()
 
     def _on_model_failed(self, message: str) -> None:
         """Model load failed: stay alive and keep saying so.
@@ -253,6 +315,7 @@ class PyWhisprApp(QObject):
         overlay, /v1/health and the log all name the cause.
         """
         self._model_error = message
+        self._finish_model_download(f"The model could not be loaded.\n\n{message}")
         self._report_error("Model failed to load", message)
 
     def _on_activate(self) -> None:

@@ -29,8 +29,15 @@ def app(qtbot, qapp):
         # join_continuations=False: these tests are about the state machine, so
         # transcripts should reach the injector exactly as the backend said them.
         # TestContinuationJoin below turns it back on.
+        # offer_gpu_setup=False: readying the model must not pop the GPU offer
+        # in tests that are about something else.
         instance = PyWhisprApp(
-            Config(play_sounds=False, api_enabled=False, join_continuations=False)
+            Config(
+                play_sounds=False,
+                api_enabled=False,
+                join_continuations=False,
+                offer_gpu_setup=False,
+            )
         )
         instance._test_backend = backend
         instance._test_recorder = recorder
@@ -379,7 +386,14 @@ class TestNetworkApi:
             patch("pywhispr.app.TrayIcon"),
             patch("pywhispr.app.load_vocabulary", return_value=[]),
         ):
-            instance = PyWhisprApp(Config(play_sounds=False, api_host="127.0.0.1", api_port=0))
+            instance = PyWhisprApp(
+                Config(
+                    play_sounds=False,
+                    api_host="127.0.0.1",
+                    api_port=0,
+                    offer_gpu_setup=False,
+                )
+            )
         try:
             assert instance.api is not None
             assert instance.api.start()
@@ -408,3 +422,91 @@ def test_max_duration_stops_recording(app, qtbot):
     app._on_max_duration()
     assert app.state == State.TRANSCRIBING
     wait_for_worker(app, qtbot)
+
+
+class TestGpuOffer:
+    """The offer only appears where it would help, and only once."""
+
+    def _ready(self, app, providers=("CPUExecutionProvider",), driver=596.08):
+        app.cfg.offer_gpu_setup = True
+        with (
+            patch("pywhispr.stt.onnx_backend.session_providers", return_value=set(providers)),
+            patch("pywhispr.cuda.nvidia_driver_version", return_value=driver),
+            patch("pywhispr.cuda.is_installed", return_value=False),
+            patch("sys.platform", "win32"),
+            patch("pywhispr.ui.gpu_dialog.ask_to_enable") as ask,
+            patch("pywhispr.ui.gpu_dialog.run_setup") as run,
+        ):
+            app._maybe_offer_gpu()
+        return ask, run
+
+    def test_offered_when_the_gpu_is_going_unused(self, app):
+        ask, run = self._ready(app)
+        ask.assert_called_once()
+
+    def test_not_offered_when_already_on_the_gpu(self, app):
+        ask, _ = self._ready(app, providers=("CUDAExecutionProvider", "CPUExecutionProvider"))
+        ask.assert_not_called()
+
+    def test_not_offered_without_an_nvidia_driver(self, app):
+        ask, _ = self._ready(app, driver=None)
+        ask.assert_not_called()
+
+    def test_not_offered_once_declined_for_good(self, app):
+        with (
+            patch("pywhispr.cuda.can_offer", return_value=(True, "")),
+            patch("pywhispr.ui.gpu_dialog.ask_to_enable") as ask,
+        ):
+            app.cfg.offer_gpu_setup = False
+            app._maybe_offer_gpu()
+        ask.assert_not_called()
+
+    def test_never_stops_it_being_offered_again(self, app):
+        with (
+            patch("pywhispr.ui.gpu_dialog.ask_to_enable", return_value=None),
+            patch("pywhispr.cuda.can_offer", return_value=(True, "")),
+            patch("pywhispr.app.save_config") as save,
+        ):
+            app._enable_gpu()
+        assert app.cfg.offer_gpu_setup is False
+        save.assert_called_once()
+
+    def test_the_tray_entry_reports_when_it_cannot_help(self, app):
+        with (
+            patch("pywhispr.cuda.can_offer", return_value=(False, "no NVIDIA GPU was found")),
+            patch("pywhispr.cuda.is_installed", return_value=False),
+            patch("pywhispr.ui.gpu_dialog.ask_to_enable") as ask,
+        ):
+            app._enable_gpu(asked_by_user=True)
+        ask.assert_not_called()
+        app.tray.notify.assert_called_once()
+
+
+class TestModelDownloadProgress:
+    def test_shown_only_when_nothing_is_cached(self, app):
+        with (
+            patch("pywhispr.download.model_cached", return_value=True),
+            patch("pywhispr.ui.download_dialog.ModelDownloadDialog") as dialog,
+        ):
+            app._show_model_download()
+        dialog.assert_not_called()
+
+        with (
+            patch("pywhispr.download.model_cached", return_value=False),
+            patch("pywhispr.ui.download_dialog.ModelDownloadDialog") as dialog,
+        ):
+            app._show_model_download()
+        dialog.assert_called_once()
+
+    def test_closed_when_the_model_is_ready(self, app):
+        app._download_dialog = MagicMock()
+        dialog = app._download_dialog
+        app._on_model_ready()
+        dialog.finish.assert_called_once_with(None)
+        assert app._download_dialog is None
+
+    def test_a_failed_load_says_so_in_the_window(self, app):
+        app._download_dialog = MagicMock()
+        dialog = app._download_dialog
+        app._on_model_failed("RuntimeError: offline")
+        assert "offline" in dialog.finish.call_args.args[0]

@@ -41,10 +41,13 @@ def add_cuda_dll_directories() -> list[str]:
     """
     if sys.platform != "win32":
         return []  # ELF rpath handles this on Linux
+    from pywhispr.cuda import install_dir
+
     spec = importlib.util.find_spec("nvidia")
     roots = list(spec.submodule_search_locations or ()) if spec is not None else []
     added = []
-    candidates = []
+    # `pywhispr enable-gpu` flattens its DLLs into one directory; pip nests them.
+    candidates = [install_dir()] if install_dir().is_dir() else []
     for root in roots:
         candidates.extend(sorted(Path(root).glob("*/bin*/**/")))
     for path in candidates:

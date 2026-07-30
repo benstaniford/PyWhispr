@@ -37,6 +37,9 @@ class Config:
     # onnxruntime's default of one per core — see stt/onnx_backend.py. None uses
     # PyWhispr's tuned default; 0 restores onnxruntime's.
     stt_threads: int | None = None
+    # Offer the one-time CUDA download when there is an NVIDIA GPU going unused.
+    # Set false (or answer "Never") to stop asking; the tray menu still has it.
+    offer_gpu_setup: bool = True
     max_recording_seconds: int = 120
     play_sounds: bool = True
     paste_delay_ms: int = 150
