@@ -20,8 +20,15 @@ build_exe_options = {
     # truststore is imported lazily inside pywhispr.certs, so the scanner never
     # sees it; leaving it out costs the OS trust store and, behind corporate TLS
     # inspection, the first-run model download.
+    # email and importlib.metadata in whole because a half-frozen stdlib package is
+    # worse than none: the exe records the build Python's stdlib directory, and where
+    # that path exists at runtime, `email.__init__` came from library.zip while
+    # `email.message` came from disk — "cannot import name 'header' from 'email'",
+    # which killed `PyWhispr.exe verify-gpu`. The GUI only escaped it because
+    # api.py imports email.parser early enough to win the race.
     "packages": [
         "pywhispr", "onnx_asr", "onnxruntime", "pynput", "_sounddevice_data", "truststore",
+        "email", "importlib.metadata",
     ],
     # Keep pywhispr as real files so importlib.resources finds assets/.
     # _sounddevice_data must also stay unzipped: sounddevice dlopens the

@@ -35,7 +35,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--seconds", type=float, default=5.0, help="recording duration (default: 5)"
     )
 
-    sub.add_parser("download", help="pre-download the speech-to-text model")
+    p_download = sub.add_parser("download", help="pre-download the speech-to-text model")
+    p_download.add_argument(
+        "--quantization",
+        default=None,
+        help='model variant to fetch ("int8", or "" for full precision); '
+        "default: whatever the config says",
+    )
+
+    sub.add_parser("enable-gpu", help="download the CUDA libraries for NVIDIA GPU acceleration")
+    sub.add_parser("disable-gpu", help="remove the downloaded CUDA libraries")
+    p_verify = sub.add_parser(
+        "verify-gpu", help="report whether transcription really runs on the GPU"
+    )
+    p_verify.add_argument(
+        "--quantization",
+        default=None,
+        help="model variant to check with (default: whatever the config says). "
+        "The check only needs a model the GPU can load, so passing the variant "
+        "already downloaded avoids fetching another one.",
+    )
 
     sub.add_parser(
         "diagnose", help="print environment details and test-load the model (for bug reports)"
@@ -73,19 +92,31 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_record(args.seconds)
 
     if command == "download":
-        return _cmd_download()
+        return _cmd_download(args.quantization)
 
     if command == "diagnose":
         return _cmd_diagnose()
 
+    if command == "enable-gpu":
+        return _cmd_enable_gpu()
+
+    if command == "disable-gpu":
+        return _cmd_disable_gpu()
+
+    if command == "verify-gpu":
+        return _cmd_verify_gpu(args.quantization)
+
     return 2
 
 
-def _load_backend():
+def _load_backend(quantization: str | None = None):
     from pywhispr.config import load_config
     from pywhispr.stt import create_backend
 
-    backend = create_backend(load_config())
+    config = load_config()
+    if quantization is not None:
+        config.model_quantization = quantization
+    backend = create_backend(config)
     log.info("Loading model (%s)...", backend.name)
     backend.load()
     return backend
@@ -131,9 +162,74 @@ def _cmd_record(seconds: float) -> int:
     return 0
 
 
-def _cmd_download() -> int:
-    _load_backend()
+def _cmd_download(quantization: str | None = None) -> int:
+    _load_backend(quantization)
     print("Model downloaded and loaded successfully.")
+    return 0
+
+
+def _cmd_enable_gpu() -> int:
+    from pywhispr import cuda
+
+    offer, why_not = cuda.can_offer()
+    if not offer and not cuda.is_installed():
+        print(f"Not available: {why_not}")
+        return 1
+
+    if not cuda.is_installed():
+        print(f"Downloading the CUDA libraries (~{cuda.APPROXIMATE_DOWNLOAD_MB} MB)...")
+
+        def progress(fraction: float, message: str) -> bool:
+            print(f"\r{fraction * 100:5.1f}%  {message:<60}", end="", flush=True)
+            return True
+
+        try:
+            cuda.download(progress)
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 1
+        except Exception as exc:
+            log.exception("CUDA download failed")
+            print(f"\nFailed: {type(exc).__name__}: {exc}")
+            return 1
+        print()
+
+    print("Checking that transcription really runs on the GPU...")
+    works, detail = cuda.verify()
+    print(f"{'Ready' if works else 'Not working'}: {detail}")
+    return 0 if works else 1
+
+
+def _cmd_disable_gpu() -> int:
+    from pywhispr import cuda
+
+    print("Removed the CUDA libraries." if cuda.remove() else "Nothing to remove.")
+    return 0
+
+
+def _cmd_verify_gpu(quantization: str | None = None) -> int:
+    """Load the model here and now, and report the providers actually in use.
+
+    Run in a subprocess by `cuda.verify()`, so its output is a single line and its
+    exit code is the answer: onnxruntime only resolves providers once per process,
+    which is why this cannot be checked in the app that just installed them.
+
+    ``quantization`` exists so the check can reuse the variant already downloaded.
+    Left to itself it would see working CUDA, choose full precision and fetch 2.4 GB
+    inside a step the user is only being shown as "checking…".
+    """
+    import numpy as np
+
+    from pywhispr.stt.onnx_backend import session_providers
+
+    backend = _load_backend(quantization)
+    providers = session_providers(getattr(backend, "_model", None))
+    accelerated = sorted(p for p in providers if p != "CPUExecutionProvider")
+    if not accelerated:
+        print("transcription runs on the CPU: no GPU execution provider loaded")
+        return 1
+    backend.transcribe(np.zeros(16000, dtype=np.float32))  # prove it can actually run
+    print(f"transcription runs on the GPU via {', '.join(accelerated)}")
     return 0
 
 

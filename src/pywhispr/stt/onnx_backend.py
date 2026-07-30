@@ -30,6 +30,15 @@ DEFAULT_THREADS = 4
 # the quantised ops have no CUDA kernels. So it is chosen, not defaulted.
 CPU_QUANTIZATION = "int8"
 
+# The variants are separate downloads, and picking wrong costs the user gigabytes:
+# full precision is 2.4 GB, int8 is 0.65 GB. Hence cuda_libraries_load(), which
+# decides *before* anything is fetched rather than after.
+DOWNLOAD_MB = {None: 2450, "int8": 650}
+
+# What the CUDA provider needs at load time. Loading them by name proves the
+# provider will work without downloading a model to find out.
+CUDA_PROBE_DLLS = ("cudart64_13.dll", "cublasLt64_13.dll", "cufft64_12.dll", "cudnn64_9.dll")
+
 
 def add_cuda_dll_directories() -> list[str]:
     """Put the pip-installed CUDA/cuDNN DLLs on Windows' DLL search path.
@@ -41,10 +50,13 @@ def add_cuda_dll_directories() -> list[str]:
     """
     if sys.platform != "win32":
         return []  # ELF rpath handles this on Linux
+    from pywhispr.cuda import install_dir
+
     spec = importlib.util.find_spec("nvidia")
     roots = list(spec.submodule_search_locations or ()) if spec is not None else []
     added = []
-    candidates = []
+    # `pywhispr enable-gpu` flattens its DLLs into one directory; pip nests them.
+    candidates = [install_dir()] if install_dir().is_dir() else []
     for root in roots:
         candidates.extend(sorted(Path(root).glob("*/bin*/**/")))
     for path in candidates:
@@ -55,6 +67,28 @@ def add_cuda_dll_directories() -> list[str]:
                 continue
             added.append(str(path))
     return added
+
+
+def cuda_libraries_load() -> bool:
+    """Can the CUDA libraries actually be loaded in this process?
+
+    onnxruntime reports CUDAExecutionProvider as available whether or not they are
+    installed, and the truth only comes out when a session is built — by which
+    time a 2.4 GB model has been downloaded. Loading the DLLs by name is the same
+    question asked for free.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    add_cuda_dll_directories()
+    for name in CUDA_PROBE_DLLS:
+        try:
+            ctypes.WinDLL(name)
+        except OSError:
+            log.debug("CUDA probe: %s could not be loaded", name)
+            return False
+    return True
 
 
 def session_providers(model) -> set[str]:
@@ -110,10 +144,29 @@ class OnnxBackend(STTBackend):
         variant = f", {self._quantization}" if self._quantization else ""
         return f"onnx-asr ({self._model_id}{variant})"
 
+    @property
+    def quantization(self) -> str | None:
+        """The variant in use, once chosen: None is full precision."""
+        return self._quantization
+
+    @property
+    def download_mb(self) -> int:
+        """Roughly what a first run will fetch, for the progress window."""
+        return DOWNLOAD_MB.get(self._quantization, DOWNLOAD_MB[None])
+
+    def choose_quantization(self) -> None:
+        """Pick the variant before it is downloaded, unless the user set one."""
+        if self._quantization is not None:
+            return
+        if not cuda_libraries_load():
+            self._quantization = CPU_QUANTIZATION
+            log.info("No usable CUDA runtime: loading the quantised model (%s)", CPU_QUANTIZATION)
+
     def load(self) -> None:
         import onnx_asr
         import onnxruntime
 
+        self.choose_quantization()
         try:
             found = add_cuda_dll_directories()
             log.debug("CUDA DLL directories added: %s", found or "none found")
@@ -144,10 +197,12 @@ class OnnxBackend(STTBackend):
             )
 
         log.info(
-            "Loading %s with providers %s, %s intra-op thread(s) (first run downloads ~600 MB)",
+            "Loading %s with providers %s, %s intra-op thread(s) "
+            "(a first run downloads about %d MB)",
             self.name,
             providers,
             self._threads or "onnxruntime's default",
+            self.download_mb,
         )
         started = time.monotonic()
         try:

@@ -24,6 +24,6 @@ logging.getLogger(__name__).info(
     use_system_certificates(),
 )
 
-from pywhispr.app import run_app  # noqa: E402
+from pywhispr.frozen import run  # noqa: E402
 
-sys.exit(run_app())
+sys.exit(run(sys.argv[1:]))

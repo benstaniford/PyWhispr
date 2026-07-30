@@ -61,6 +61,12 @@ class TestOnnxProviderFallback:
         onnx_asr.load_model.return_value = fake_model("CPUExecutionProvider")
         monkeypatch.setitem(sys.modules, "onnxruntime", onnxruntime)
         monkeypatch.setitem(sys.modules, "onnx_asr", onnx_asr)
+        # Otherwise the real probe runs and the result depends on whether this
+        # developer's machine has CUDA — which made these tests fail differently on
+        # each run while enable-gpu was mid-download. Tests wanting it override.
+        from pywhispr.stt import onnx_backend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
         return onnx_asr, onnxruntime
 
     def _backend(self):
@@ -68,7 +74,10 @@ class TestOnnxProviderFallback:
 
         return OnnxBackend()
 
-    def test_prefers_cuda_when_it_works(self, modules):
+    def test_prefers_cuda_when_it_works(self, modules, monkeypatch):
+        from pywhispr.stt import onnx_backend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: True)
         onnx_asr, _ = modules
         onnx_asr.load_model.return_value = fake_model("CUDAExecutionProvider")
         backend = self._backend()
@@ -107,11 +116,25 @@ class TestOnnxProviderFallback:
         backend.load()
         assert onnx_asr.load_model.call_args.kwargs["quantization"] == "int8"
 
-    def test_quantises_automatically_on_the_cpu(self, modules):
-        """int8 is ~2x on the CPU and ~4x *slower* on the GPU, so it is decided
-        by where the sessions actually landed, not by a fixed default."""
+    def test_quantises_from_the_first_load_without_a_usable_cuda(self, modules, monkeypatch):
+        """Deciding late would download full precision (2.4GB) and then int8 too."""
+        from pywhispr.stt import onnx_backend
         from pywhispr.stt.onnx_backend import CPU_QUANTIZATION
 
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        onnx_asr, _ = modules
+        backend = self._backend()
+        backend.load()
+        assert onnx_asr.load_model.call_args_list[0].kwargs["quantization"] == CPU_QUANTIZATION
+        assert onnx_asr.load_model.call_count == 1  # nothing downloaded twice
+
+    def test_quantises_late_if_cuda_looked_usable_but_was_not(self, modules, monkeypatch):
+        """The libraries loaded, so full precision was the right bet — but the
+        sessions still came back on the CPU, where int8 is worth the extra fetch."""
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import CPU_QUANTIZATION
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: True)
         onnx_asr, _ = modules  # fixture's model runs on the CPU
         backend = self._backend()
         backend.load()
@@ -119,8 +142,11 @@ class TestOnnxProviderFallback:
         assert onnx_asr.load_model.call_args_list[-1].kwargs["quantization"] == CPU_QUANTIZATION
         assert backend._quantization == CPU_QUANTIZATION
 
-    def test_a_failed_quantised_reload_keeps_the_working_model(self, modules):
+    def test_a_failed_quantised_reload_keeps_the_working_model(self, modules, monkeypatch):
         """The quantised weights are a separate download; no network, no problem."""
+        from pywhispr.stt import onnx_backend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: True)
         onnx_asr, _ = modules
         full_precision = fake_model("CPUExecutionProvider")
         onnx_asr.load_model.side_effect = [full_precision, RuntimeError("offline")]
@@ -150,6 +176,7 @@ class TestOnnxProviderFallback:
 
     def test_cuda_dll_directories_are_added_from_the_nvidia_wheels(self, tmp_path, monkeypatch):
         """The pip CUDA wheels hide their DLLs where nothing searches."""
+        import pywhispr.cuda
         from pywhispr.stt import onnx_backend
 
         libs = tmp_path / "cu13" / "bin" / "x86_64"
@@ -162,6 +189,9 @@ class TestOnnxProviderFallback:
         monkeypatch.setattr(onnx_backend.sys, "platform", "win32")
         monkeypatch.setattr(onnx_backend.importlib.util, "find_spec", lambda name: spec)
         monkeypatch.setattr(onnx_backend.os, "add_dll_directory", added.append, raising=False)
+        # Otherwise a developer who has run enable-gpu gets their own CUDA
+        # directory in the result and the test fails on their machine only.
+        monkeypatch.setattr(pywhispr.cuda, "install_dir", lambda: tmp_path / "not-installed")
 
         assert onnx_backend.add_cuda_dll_directories() == [str(libs)]
         assert added == [str(libs)]  # only the directory that has DLLs in it
@@ -210,3 +240,56 @@ def test_real_model_transcribes_fixture():
     text = backend.transcribe(audio).lower()
     assert "hello world" in text
     assert "transcription" in text
+
+
+class TestVariantChosenBeforeDownloading:
+    """The variants are separate downloads: fp32 2.4GB, int8 0.7GB. Loading the
+    wrong one first and correcting afterwards costs the user both."""
+
+    def test_no_usable_cuda_means_int8_before_any_download(self, monkeypatch):
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import CPU_QUANTIZATION, OnnxBackend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        backend = OnnxBackend()
+        backend.choose_quantization()
+        assert backend._quantization == CPU_QUANTIZATION
+        assert backend.download_mb < 1000
+
+    def test_usable_cuda_keeps_full_precision(self, monkeypatch):
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: True)
+        backend = OnnxBackend()
+        backend.choose_quantization()
+        assert backend._quantization is None
+        assert backend.download_mb > 2000
+
+    def test_an_explicit_choice_is_never_overridden(self, monkeypatch):
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        backend = OnnxBackend(quantization="")
+        backend.choose_quantization()
+        assert backend._quantization == ""
+
+    def test_the_probe_needs_every_library(self, monkeypatch, tmp_path):
+        import ctypes
+
+        from pywhispr.stt import onnx_backend
+
+        monkeypatch.setattr(onnx_backend.sys, "platform", "win32")
+        monkeypatch.setattr(onnx_backend, "add_cuda_dll_directories", lambda: [])
+        loaded = []
+
+        def fake_windll(name):
+            loaded.append(name)
+            if name == onnx_backend.CUDA_PROBE_DLLS[-1]:
+                raise OSError("missing")
+            return object()
+
+        monkeypatch.setattr(ctypes, "WinDLL", fake_windll, raising=False)
+        assert onnx_backend.cuda_libraries_load() is False
+        assert loaded  # it stopped at the missing one rather than assuming

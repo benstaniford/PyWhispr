@@ -23,6 +23,7 @@ from __future__ import annotations
 import email.parser
 import json
 import logging
+import socketserver
 import threading
 import time
 from collections.abc import Callable
@@ -243,6 +244,19 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, address, handler, api: TranscriptionServer):
         self.api = api
         super().__init__(address, handler)
+
+    def server_bind(self):
+        """Bind without the reverse DNS lookup HTTPServer does.
+
+        HTTPServer.server_bind resolves the host name for the ``Server`` header,
+        and on a corporate network that lookup took 8 seconds — during which the
+        app has no window and looks like it failed to start. The name is only ever
+        used in headers and logs.
+        """
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
 
 
 class TranscriptionServer:

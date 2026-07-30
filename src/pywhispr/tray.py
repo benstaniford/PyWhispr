@@ -41,6 +41,7 @@ class TrayIcon(QSystemTrayIcon):
         on_toggle=None,
         on_change_hotkey=None,
         on_edit_vocabulary=None,
+        on_enable_gpu=None,
         parent=None,
     ):
         super().__init__(_make_icon(), parent)
@@ -64,6 +65,10 @@ class TrayIcon(QSystemTrayIcon):
             vocabulary = QAction("Vocabulary…", menu)
             vocabulary.triggered.connect(on_edit_vocabulary)
             menu.addAction(vocabulary)
+        if on_enable_gpu is not None:
+            enable_gpu = QAction("Enable GPU acceleration…", menu)
+            enable_gpu.triggered.connect(on_enable_gpu)
+            menu.addAction(enable_gpu)
         open_config = QAction("Open config file", menu)
         open_config.triggered.connect(self._open_config)
         menu.addAction(open_config)
