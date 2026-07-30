@@ -176,7 +176,7 @@ class PyWhisprApp(QObject):
                 log.exception("Model load failed after %.1fs", time.monotonic() - started)
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
-        log.info("Loading %s (first run downloads the model, ~600 MB)...", self.backend.name)
+        log.info("Loading %s (a first run downloads the model)...", self.backend.name)
         self._show_model_download()
         self._worker.submit(load)
 
@@ -188,7 +188,7 @@ class PyWhisprApp(QObject):
             return
         from pywhispr.ui.download_dialog import ModelDownloadDialog
 
-        self._download_dialog = ModelDownloadDialog()
+        self._download_dialog = ModelDownloadDialog(self.backend.download_mb)
         self._download_dialog.show()
 
     def _finish_model_download(self, message: str | None = None) -> None:

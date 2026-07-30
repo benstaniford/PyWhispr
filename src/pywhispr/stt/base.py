@@ -21,6 +21,11 @@ class STTBackend(ABC):
     def name(self) -> str:
         """Human-readable backend/model description for logs."""
 
+    @property
+    def download_mb(self) -> int:
+        """Roughly what a first run will fetch, for the progress window."""
+        return 2450
+
     @abstractmethod
     def load(self) -> None:
         """Download (if needed) and load the model. May take minutes on first run."""
