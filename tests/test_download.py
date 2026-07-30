@@ -20,39 +20,36 @@ class TestCacheProbe:
         assert download.model_cached(minimum_mb=1) is True
 
 
-class TestDialog:
+class TestProgressInTheWindow:
     """Progress comes from the cache growing, since the downloader has no callback."""
 
-    def test_tracks_growth_from_where_it_started(self, tmp_path, monkeypatch, qtbot):
+    def _window(self, tmp_path, monkeypatch, qtbot, expected_mb=10):
         monkeypatch.setattr(download, "cache_dir", lambda: tmp_path)
+        from pywhispr.ui.setup_window import SetupWindow
+
+        window = SetupWindow()
+        qtbot.addWidget(window)
+        window.track_model_download(expected_mb)
+        return window
+
+    def test_tracks_growth_from_where_it_started(self, tmp_path, monkeypatch, qtbot):
         (tmp_path / "already-there").write_bytes(b"\x00" * 5 * 1024 * 1024)
-
-        from pywhispr.ui.download_dialog import ModelDownloadDialog
-
-        dialog = ModelDownloadDialog(expected_mb=10)
-        qtbot.addWidget(dialog)
-        assert dialog._bar.value() == 0  # the 5 MB already cached is not progress
+        window = self._window(tmp_path, monkeypatch, qtbot)
+        assert window._bar.value() == 0  # the 5 MB already cached is not progress
 
         (tmp_path / "new").write_bytes(b"\x00" * 5 * 1024 * 1024)
-        dialog._poll()
-        assert dialog._bar.value() == 500
+        window._poll_model()
+        assert window._bar.value() == 500
 
     def test_overshooting_the_estimate_goes_indeterminate(self, tmp_path, monkeypatch, qtbot):
-        monkeypatch.setattr(download, "cache_dir", lambda: tmp_path)
-        from pywhispr.ui.download_dialog import ModelDownloadDialog
-
-        dialog = ModelDownloadDialog(expected_mb=1)
-        qtbot.addWidget(dialog)
+        window = self._window(tmp_path, monkeypatch, qtbot, expected_mb=1)
         (tmp_path / "new").write_bytes(b"\x00" * 3 * 1024 * 1024)
-        dialog._poll()
-        assert dialog._bar.maximum() == 0
+        window._poll_model()
+        assert window._bar.maximum() == 0
 
     def test_failure_is_reported_rather_than_closing(self, tmp_path, monkeypatch, qtbot):
-        monkeypatch.setattr(download, "cache_dir", lambda: tmp_path)
-        from pywhispr.ui.download_dialog import ModelDownloadDialog
-
-        dialog = ModelDownloadDialog()
-        qtbot.addWidget(dialog)
-        dialog.finish("The model could not be loaded.\n\nRuntimeError: offline")
-        assert not dialog._timer.isActive()
-        assert "could not be loaded" in dialog._status.text()
+        window = self._window(tmp_path, monkeypatch, qtbot)
+        window.finish_model("The model could not be loaded.\n\nRuntimeError: offline")
+        assert window._model_timer is None
+        assert "could not be loaded" in window._model_line.text()
+        assert window.result() != window.DialogCode.Accepted  # stays up to be read
