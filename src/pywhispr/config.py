@@ -40,6 +40,11 @@ class Config:
     lowercase_continuations: bool = True
     context_chars: int = 64
     context_memory_seconds: int = 90
+    # Filler removal: "um"/"uh"-style hesitations. extra_filler_words adds terms
+    # of your own; keep_filler_words spares a built-in.
+    remove_fillers: bool = True
+    extra_filler_words: list[str] = dataclasses.field(default_factory=list)
+    keep_filler_words: list[str] = dataclasses.field(default_factory=list)
     # Custom vocabulary: correct the transcript's spelling of terms listed in
     # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.

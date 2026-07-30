@@ -74,6 +74,9 @@ this. (On Windows, double-tap works without any special permission.)
 | `lowercase_continuations` | `true` | Also lower-case the new text's first word when the sentence in front of the caret is unfinished |
 | `context_chars` | `64` | How many characters before the caret are read to decide the join |
 | `context_memory_seconds` | `90` | When the caret can't be read, how long PyWhispr trusts its memory of its own last insertion |
+| `remove_fillers` | `true` | Drop *um*, *uh*, *erm* and friends from the transcript — see [Filler removal](#filler-removal) |
+| `extra_filler_words` | `[]` | More terms to drop, e.g. `["you know", "hmm", "like"]` (a phrase only matches those words next to each other) |
+| `keep_filler_words` | `[]` | Built-in fillers to leave alone, e.g. `["er", "well"]` |
 | `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via tray menu → **Vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `api_enabled` | `true` | Serve the [network API](#network-api) |
@@ -113,6 +116,44 @@ Because this reads a few characters out of whatever window is focused, that text
 is **never written to the log** — only its length. Set `join_continuations = false`
 to turn the whole thing off, or `lowercase_continuations = false` to keep the
 spacing fix without the capitalisation change.
+
+## Filler removal
+
+Speech models are faithful: say *"Um, so I, uh, think so."* and that is exactly
+what gets typed. PyWhispr takes the hesitations out, along with the spacing and
+punctuation they leave behind:
+
+| You said | You get |
+|---|---|
+| *Um, so I think so.* | *So I think so.* |
+| *I think, uh, we should go.* | *I think we should go.* |
+| *I think so, um.* | *I think so.* |
+| *Hello. Um. Right then.* | *Hello. Right then.* |
+| *Um.* | nothing at all |
+
+The capital moves onto the word that now starts the sentence, a comma pair that
+was only holding the filler apart goes with it, a bracket or dash pair is tidied,
+and a run of them (*um, uh,*) is removed in one piece. A comma the sentence needs
+stays: *"We need milk, um, eggs."* → *"We need milk, eggs."*, and *"If you do, um,
+tell me."* keeps the comma that stops it reading as *"if you do tell me"*.
+
+Only a **closed list of hesitation sounds** is removed: *um*, *umm*, *uhm*, *uh*,
+*uhh*, *erm*, *er*, *ahem* and their longer spellings. Words that merely look like
+filler are left alone, because a wrongly deleted word costs a re-dictation while a
+surviving *um* costs a keystroke: *uh-huh* and *uh huh* mean yes, *uh oh* means
+trouble, *err on the side of caution* is a verb, and *ER* and *ERM* are an acronym.
+Add terms you never mean with `extra_filler_words = ["you know", "hmm"]`, spare a
+built-in with `keep_filler_words`, or set `remove_fillers = false`. These are read
+at startup, so restart PyWhispr after changing them.
+
+**What this does not do.** Conversational filler — *you know*, *I mean*,
+*basically*, *sort of* — is left alone unless you list it yourself. Removing it
+reliably needs to understand the sentence: *"you know that I left"* must keep its
+words while *"it's, you know, complicated"* should lose them, and no word list
+draws that line. (Wispr Flow does this with a fine-tuned LLM cleanup pass in the
+cloud; PyWhispr is local and has no such pass.) Note also that recent Parakeet
+models drop most hesitations by themselves, so on a good recording this pass
+often has nothing to do.
 
 ## Custom vocabulary
 
