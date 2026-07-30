@@ -133,12 +133,15 @@ class GpuSetupDialog(QDialog):
     # the model load is waiting on this.
     setup_finished = Signal(bool)
 
-    def __init__(self) -> None:
+    def __init__(self, first_run: bool = False) -> None:
         super().__init__()
         self.setWindowTitle("PyWhispr — GPU acceleration")
         self.setModal(False)
         self.setMinimumWidth(460)
         self.worked = False
+        # On a first run the model loads straight after this, in this process:
+        # nothing has built a session yet, so there is nothing to restart for.
+        self._first_run = first_run
 
         self._status = QLabel("Starting…")
         self._status.setWordWrap(True)
@@ -181,30 +184,55 @@ class GpuSetupDialog(QDialog):
         self._buttons.setEnabled(True)
         self._buttons.rejected.connect(self.accept)
         if worked:
+            next_step = (
+                "Loading the model now — dictation is about to be ready."
+                if self._first_run
+                else "Restart PyWhispr to start using it."
+            )
             self._status.setText(
                 f"GPU acceleration is ready and working — {detail}.\n\n"
-                "Restart PyWhispr to start using it. Nothing else to download."
+                f"{next_step} Nothing else to download."
             )
         else:
             from pywhispr.logging_setup import log_path
 
+            on_the_cpu = (
+                "Dictation will start on the CPU instead"
+                if self._first_run
+                else "Dictation keeps working on the CPU"
+            )
             self._status.setText(
                 f"GPU acceleration was not enabled: {detail}\n\n"
-                f"Dictation keeps working on the CPU. Details are in {log_path()}."
+                f"{on_the_cpu}. Details are in {log_path()}."
             )
         self.setup_finished.emit(worked)
 
 
-def ask_to_enable(parent=None) -> bool | None:
-    """Offer GPU acceleration. True = yes, False = not now, None = never ask again."""
+def ask_to_enable(parent=None, first_run: bool = False) -> bool | None:
+    """Offer GPU acceleration. True = yes, False = not now, None = never ask again.
+
+    ``first_run`` because the two cases promise different things: on a first run
+    there is no model yet, so dictation starts when the download finishes rather
+    than carrying on through it.
+    """
     box = QMessageBox(parent)
     box.setWindowTitle("PyWhispr — GPU acceleration available")
     box.setIcon(QMessageBox.Icon.Question)
     box.setText("GPU acceleration is available — it makes transcription near instant.")
-    box.setInformativeText(
-        "Set it up now? There is a one-time download, shown as it goes. Dictation keeps "
-        "working throughout, and “pywhispr disable-gpu” undoes it."
-    )
+    if first_run:
+        # Either answer downloads something — the GPU and CPU models are separate
+        # files — and neither can dictate until it has finished.
+        body = (
+            "Set it up now? Either way there is a one-time download first, and dictation "
+            "cannot start until it finishes. Saying yes downloads more. "
+            "“pywhispr disable-gpu” undoes it later."
+        )
+    else:
+        body = (
+            "Set it up now? There is a one-time download first. Dictation keeps working "
+            "while it runs, and “pywhispr disable-gpu” undoes it."
+        )
+    box.setInformativeText(body)
     download = box.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
     later = box.addButton("No", QMessageBox.ButtonRole.RejectRole)
     never = box.addButton("Never", QMessageBox.ButtonRole.DestructiveRole)
@@ -221,12 +249,13 @@ def ask_to_enable(parent=None) -> bool | None:
     return False
 
 
-def run_setup() -> GpuSetupDialog:
+def run_setup(first_run: bool = False) -> GpuSetupDialog:
     """Show the progress window and start work. The caller keeps the reference.
 
-    Not modal: the download is gigabytes and dictation keeps working throughout.
+    Not modal: the download is gigabytes, and on anything but a first run dictation
+    keeps working throughout.
     """
-    dialog = GpuSetupDialog()
+    dialog = GpuSetupDialog(first_run)
     show_in_front(dialog)
     dialog.start()
     return dialog

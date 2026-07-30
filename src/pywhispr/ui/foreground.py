@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import QWidget
 
@@ -32,7 +32,12 @@ def show_in_front(window: QWidget) -> None:
     window.raise_()
     window.activateWindow()
     _force_foreground(window)
-    QTimer.singleShot(RE_ASSERT_MS, lambda: _re_assert(window))
+    # Parented to the window, so closing it before the timer fires cannot leave a
+    # callback holding a deleted widget.
+    timer = QTimer(window if isinstance(window, QObject) else None)
+    timer.setSingleShot(True)
+    timer.timeout.connect(lambda: _re_assert(window))
+    timer.start(RE_ASSERT_MS)
 
 
 def centre_on_active_screen(window: QWidget) -> None:
@@ -68,9 +73,12 @@ def _force_foreground(window: QWidget) -> None:
 
 
 def _re_assert(window: QWidget) -> None:
-    if window.isVisible():
-        window.raise_()
-        window.activateWindow()
+    try:
+        if window.isVisible():
+            window.raise_()
+            window.activateWindow()
+    except RuntimeError:  # the C++ widget went away first
+        pass
 
 
 __all__ = ["centre_on_active_screen", "show_in_front"]

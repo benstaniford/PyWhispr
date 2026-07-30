@@ -208,7 +208,7 @@ class PyWhisprApp(QObject):
         from pywhispr.ui.gpu_dialog import ask_to_enable
 
         self._asked_about_gpu = True
-        answer = ask_to_enable()
+        answer = ask_to_enable(first_run=True)
         if answer is None:
             self.cfg.offer_gpu_setup = False
             save_config(self.cfg)
@@ -227,7 +227,7 @@ class PyWhisprApp(QObject):
     def _run_gpu_setup(self):
         from pywhispr.ui.gpu_dialog import run_setup
 
-        dialog = run_setup()
+        dialog = run_setup(first_run=True)
         dialog.setup_finished.connect(self._on_gpu_setup_finished)
         return dialog
 

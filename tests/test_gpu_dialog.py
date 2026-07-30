@@ -40,6 +40,40 @@ class TestOneBarForEverything:
         assert str(gpu_dialog.TOTAL_DOWNLOAD_MB) in message
 
 
+class TestWhatItPromises:
+    """A first run has no model, so it cannot promise dictation carries on."""
+
+    def _offer_text(self, first_run):
+        with patch.object(gpu_dialog, "QMessageBox") as message_box:
+            box = message_box.return_value
+            box.clickedButton.return_value = box.addButton.return_value
+            gpu_dialog.ask_to_enable(first_run=first_run)
+        return box.setInformativeText.call_args.args[0]
+
+    def test_the_offer_does_not_claim_dictation_works_during_a_first_run(self):
+        text = self._offer_text(first_run=True)
+        assert "keeps working" not in text
+        assert "cannot start until it finishes" in text
+        assert "Either way there is a one-time download" in text  # no is a download too
+
+    def test_the_offer_says_dictation_continues_for_an_existing_install(self):
+        assert "keeps working" in self._offer_text(first_run=False)
+
+    def test_a_first_run_is_not_told_to_restart(self, qtbot):
+        """The model loads in this process straight afterwards, no session built yet."""
+        dialog = gpu_dialog.GpuSetupDialog(first_run=True)
+        qtbot.addWidget(dialog)
+        dialog._on_finished(True, "via CUDAExecutionProvider")
+        assert "Restart" not in dialog._status.text()
+
+    def test_an_existing_install_is_told_to_restart(self, qtbot):
+        """Its sessions are already built on the CPU and cannot be re-resolved."""
+        dialog = gpu_dialog.GpuSetupDialog(first_run=False)
+        qtbot.addWidget(dialog)
+        dialog._on_finished(True, "via CUDAExecutionProvider")
+        assert "Restart" in dialog._status.text()
+
+
 class TestCancelling:
     def test_kills_the_check_instead_of_waiting_for_it(self, monkeypatch, tmp_path):
         """It used to wait out a multi-gigabyte download before giving up."""
