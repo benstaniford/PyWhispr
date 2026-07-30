@@ -86,13 +86,16 @@ word; `caret.py` finds `preceding`.
 - The pip CUDA wheels put their DLLs in `site-packages/nvidia/<lib>/bin[/x86_64]`,
   which nothing searches, so `add_cuda_dll_directories()` adds them.
   `onnxruntime.preload_dlls()` knows the CUDA 12 layout only and does not.
-- As of CUDA 13 there is **no `cufft64_12.dll` on PyPI** (the wheels ship `_11`),
-  so a pip-only CUDA 13 setup cannot satisfy ORT 1.27 — a full CUDA runtime
-  install is needed for the GPU path on Blackwell.
-- On the CPU path `model_quantization = "int8"` is the lever that matters:
-  measured 716 ms → 445 ms on 3 s of speech, same transcript. Parakeet TDT decodes
-  autoregressively in many tiny session runs, so the GPU wins far less here than
-  the model size suggests.
+- ORT 1.27 wants `cufft64_12.dll`, and **PyPI only has the CUDA 12 build**
+  (`_11`). The CUDA 13 one is on `https://pypi.nvidia.com` — the one part of this
+  nobody guesses. Wheels needed: `nvidia-cuda-runtime`, `nvidia-cublas`,
+  `nvidia-cudnn-cu13`, `nvidia-cufft`.
+- **Thread count matters more than anything on the CPU**, and fewer is faster:
+  15s of speech takes 1.96s on 16 threads, 0.81s on 8, 0.43s on 4. Parakeet TDT
+  decodes autoregressively, so the graph is thousands of small ops.
+- int8 is a CPU-only win: ~2x there, ~4x *slower* on the GPU (1.60s against
+  0.12s). Hence `model_quantization = None` meaning "decide from where the
+  sessions landed" rather than a fixed default.
 
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 

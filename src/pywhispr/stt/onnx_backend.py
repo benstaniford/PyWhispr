@@ -20,31 +20,24 @@ DEFAULT_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 CPU_ONLY = ["CPUExecutionProvider"]
 PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-# onnxruntime defaults to one thread per logical core, which is *much* slower here
-# than a handful of threads: Parakeet TDT decodes autoregressively, so the graph is
-# thousands of small ops whose thread-synchronisation cost swamps the parallelism.
-# Measured on 15s of speech, int8, Core Ultra 7 265H (16 cores): 4 threads 0.43s,
-# 8 threads 0.81s, 16 threads 1.96s. Four is the floor of that curve on every
-# machine tested; DEFAULT_THREADS = 0 would restore onnxruntime's own default.
+# Fewer threads than cores, by a lot. Parakeet TDT decodes autoregressively, so
+# the graph is thousands of small ops and thread synchronisation dominates: on 15s
+# of speech, 4 threads 0.43s, 8 threads 0.81s, 16 threads 1.96s. 0 restores
+# onnxruntime's own default.
 DEFAULT_THREADS = 4
 
-# Quantisation is a CPU-only win. On the GPU the int8 graph is *four times slower*
-# than fp32 (measured 1.60s vs 0.12s on 15s of speech), because the quantised ops
-# have no CUDA kernels and bounce back to the CPU. So the choice can't be a fixed
-# default: with model_quantization unset, the backend picks int8 only if it ends up
-# on the CPU.
+# int8 is ~2x on the CPU and ~4x *slower* on the GPU (1.60s against 0.12s), where
+# the quantised ops have no CUDA kernels. So it is chosen, not defaulted.
 CPU_QUANTIZATION = "int8"
 
 
 def add_cuda_dll_directories() -> list[str]:
     """Put the pip-installed CUDA/cuDNN DLLs on Windows' DLL search path.
 
-    Without this the CUDA provider fails to create ("cublasLt64_13.dll missing")
-    and every transcription runs on the CPU — several times slower, and the only
-    hint is a warning buried in the log. The wheels install their DLLs under
-    ``site-packages/nvidia/<lib>/bin[/x86_64]``, which nothing searches;
-    ``onnxruntime.preload_dlls()`` knows the CUDA 12 layout only, so the
-    directories are found here instead of hard-coded.
+    The wheels install them under ``site-packages/nvidia/<lib>/bin[/x86_64]``,
+    which nothing searches, and ``onnxruntime.preload_dlls()`` knows the CUDA 12
+    layout only. Without this the provider fails to create and everything runs on
+    the CPU, with only a log warning to say so.
     """
     if sys.platform != "win32":
         return []  # ELF rpath handles this on Linux
@@ -67,11 +60,10 @@ def add_cuda_dll_directories() -> list[str]:
 def session_providers(model) -> set[str]:
     """Which execution providers the loaded model's sessions are *actually* using.
 
-    The only honest answer available. onnxruntime happily accepts
-    CUDAExecutionProvider, silently drops it while building the session when the
-    CUDA libraries are missing, and reports the list it was given — so the log can
-    say CUDA while every op runs on the CPU. onnx_asr keeps its encoder and
-    decoder sessions as private attributes, hence the walk.
+    onnxruntime accepts CUDAExecutionProvider, silently drops it when the CUDA
+    libraries are missing, and reports back the list it was given — so this is the
+    only honest answer. The sessions are private attributes of the adapter, hence
+    the walk.
     """
     found: set[str] = set()
     seen: set[int] = set()
