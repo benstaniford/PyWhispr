@@ -76,27 +76,6 @@ word; `caret.py` finds `preceding`.
   `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
   `sys.modules` and made later tests pass for the wrong reason. Fake both.
 
-## Windows GPU and speed (`stt/onnx_backend.py`)
-
-- **`onnxruntime-gpu` advertises `CUDAExecutionProvider` with no CUDA installed**,
-  and ORT then drops it *silently* at session creation — the app looks like it is
-  on the GPU while every transcription runs on the CPU. `get_providers()` on the
-  session is the only honest answer; the provider list passed to `load_model` is
-  not. `pywhispr diagnose` is the way to check.
-- The pip CUDA wheels put their DLLs in `site-packages/nvidia/<lib>/bin[/x86_64]`,
-  which nothing searches, so `add_cuda_dll_directories()` adds them.
-  `onnxruntime.preload_dlls()` knows the CUDA 12 layout only and does not.
-- ORT 1.27 wants `cufft64_12.dll`, and **PyPI only has the CUDA 12 build**
-  (`_11`). The CUDA 13 one is on `https://pypi.nvidia.com` — the one part of this
-  nobody guesses. Wheels needed: `nvidia-cuda-runtime`, `nvidia-cublas`,
-  `nvidia-cudnn-cu13`, `nvidia-cufft`.
-- **Thread count matters more than anything on the CPU**, and fewer is faster:
-  15s of speech takes 1.96s on 16 threads, 0.81s on 8, 0.43s on 4. Parakeet TDT
-  decodes autoregressively, so the graph is thousands of small ops.
-- int8 is a CPU-only win: ~2x there, ~4x *slower* on the GPU (1.60s against
-  0.12s). Hence `model_quantization = None` meaning "decide from where the
-  sessions landed" rather than a fixed default.
-
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing
