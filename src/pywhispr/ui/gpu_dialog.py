@@ -200,19 +200,13 @@ def ask_to_enable(parent=None) -> bool | None:
     box = QMessageBox(parent)
     box.setWindowTitle("PyWhispr — GPU acceleration available")
     box.setIcon(QMessageBox.Icon.Question)
-    box.setText(
-        "Your NVIDIA GPU transcribes about 3–4x faster, on the full-precision model "
-        "instead of the quantised one."
-    )
+    box.setText("GPU acceleration is available — it makes transcription near instant.")
     box.setInformativeText(
-        f"One download of about {TOTAL_DOWNLOAD_MB} MB, once: "
-        f"{cuda.APPROXIMATE_DOWNLOAD_MB} MB of CUDA libraries and "
-        f"{APPROXIMATE_MODEL_MB} MB of model weights.\n\n"
-        "No admin rights needed. Dictation keeps working throughout, and "
-        "“pywhispr disable-gpu” undoes it."
+        "Set it up now? There is a one-time download, shown as it goes. Dictation keeps "
+        "working throughout, and “pywhispr disable-gpu” undoes it."
     )
-    download = box.addButton("Download", QMessageBox.ButtonRole.AcceptRole)
-    later = box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+    download = box.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
+    later = box.addButton("No", QMessageBox.ButtonRole.RejectRole)
     never = box.addButton("Never", QMessageBox.ButtonRole.DestructiveRole)
     box.setDefaultButton(download)
     show_in_front(box)
