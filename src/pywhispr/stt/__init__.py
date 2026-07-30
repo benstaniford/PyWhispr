@@ -20,4 +20,6 @@ def create_backend(cfg: Config) -> STTBackend:
 
     from pywhispr.stt.onnx_backend import OnnxBackend
 
-    return OnnxBackend(cfg.model_override)
+    return OnnxBackend(
+        cfg.model_override, quantization=cfg.model_quantization, threads=cfg.stt_threads
+    )

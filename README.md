@@ -66,6 +66,7 @@ this. (On Windows, double-tap works without any special permission.)
 | `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
+| `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
@@ -113,6 +114,20 @@ Because this reads a few characters out of whatever window is focused, that text
 is **never written to the log** — only its length. Set `join_continuations = false`
 to turn the whole thing off, or `lowercase_continuations = false` to keep the
 spacing fix without the capitalisation change.
+
+## Speed
+
+Transcription runs on the **CPU unless a full CUDA 13 runtime and cuDNN 9 are
+installed** — `onnxruntime-gpu` advertises `CUDAExecutionProvider` whether or not
+the libraries are there, and quietly falls back. `pywhispr diagnose` prints which
+providers actually loaded, and PyWhispr adds the pip CUDA wheels'
+(`nvidia-cublas`, `nvidia-cudnn-cu13`, …) DLL directories to the search path,
+since nothing else does.
+
+On the CPU path, `model_quantization = "int8"` is the lever that matters: roughly
+**1.5–2× faster** for a small accuracy cost, on the same audio and the same
+wording in testing (3 s of speech: 716 ms → 445 ms). The quantised weights are a
+separate download, fetched on first use.
 
 ## Custom vocabulary
 

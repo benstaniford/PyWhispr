@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -16,20 +20,119 @@ DEFAULT_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 CPU_ONLY = ["CPUExecutionProvider"]
 PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
+# onnxruntime defaults to one thread per logical core, which is *much* slower here
+# than a handful of threads: Parakeet TDT decodes autoregressively, so the graph is
+# thousands of small ops whose thread-synchronisation cost swamps the parallelism.
+# Measured on 15s of speech, int8, Core Ultra 7 265H (16 cores): 4 threads 0.43s,
+# 8 threads 0.81s, 16 threads 1.96s. Four is the floor of that curve on every
+# machine tested; DEFAULT_THREADS = 0 would restore onnxruntime's own default.
+DEFAULT_THREADS = 4
+
+# Quantisation is a CPU-only win. On the GPU the int8 graph is *four times slower*
+# than fp32 (measured 1.60s vs 0.12s on 15s of speech), because the quantised ops
+# have no CUDA kernels and bounce back to the CPU. So the choice can't be a fixed
+# default: with model_quantization unset, the backend picks int8 only if it ends up
+# on the CPU.
+CPU_QUANTIZATION = "int8"
+
+
+def add_cuda_dll_directories() -> list[str]:
+    """Put the pip-installed CUDA/cuDNN DLLs on Windows' DLL search path.
+
+    Without this the CUDA provider fails to create ("cublasLt64_13.dll missing")
+    and every transcription runs on the CPU — several times slower, and the only
+    hint is a warning buried in the log. The wheels install their DLLs under
+    ``site-packages/nvidia/<lib>/bin[/x86_64]``, which nothing searches;
+    ``onnxruntime.preload_dlls()`` knows the CUDA 12 layout only, so the
+    directories are found here instead of hard-coded.
+    """
+    if sys.platform != "win32":
+        return []  # ELF rpath handles this on Linux
+    spec = importlib.util.find_spec("nvidia")
+    roots = list(spec.submodule_search_locations or ()) if spec is not None else []
+    added = []
+    candidates = []
+    for root in roots:
+        candidates.extend(sorted(Path(root).glob("*/bin*/**/")))
+    for path in candidates:
+        if any(path.glob("*.dll")):
+            try:
+                os.add_dll_directory(str(path))
+            except OSError:  # vanished, or not a directory after all
+                continue
+            added.append(str(path))
+    return added
+
+
+def session_providers(model) -> set[str]:
+    """Which execution providers the loaded model's sessions are *actually* using.
+
+    The only honest answer available. onnxruntime happily accepts
+    CUDAExecutionProvider, silently drops it while building the session when the
+    CUDA libraries are missing, and reports the list it was given — so the log can
+    say CUDA while every op runs on the CPU. onnx_asr keeps its encoder and
+    decoder sessions as private attributes, hence the walk.
+    """
+    found: set[str] = set()
+    seen: set[int] = set()
+
+    def walk(obj, depth: int) -> None:
+        if depth > 3 or id(obj) in seen:
+            return
+        seen.add(id(obj))
+        for name in dir(obj):
+            if name.startswith("__"):
+                continue
+            try:
+                attribute = getattr(obj, name)
+            except Exception:  # properties can raise before the model is ready
+                continue
+            providers = getattr(attribute, "get_providers", None)
+            if callable(providers):
+                try:
+                    found.update(providers())
+                except Exception:
+                    continue
+            elif hasattr(attribute, "__dict__") and not callable(attribute):
+                walk(attribute, depth + 1)  # the sessions hide inside the adapter
+
+    walk(model, 0)
+    return found
+
 
 class OnnxBackend(STTBackend):
-    def __init__(self, model_id: str | None = None):
+    def __init__(
+        self,
+        model_id: str | None = None,
+        quantization: str | None = None,
+        threads: int | None = None,
+    ):
         self._model_id = model_id or DEFAULT_MODEL
+        self._quantization = quantization
+        self._threads = DEFAULT_THREADS if threads is None else threads
         self._model = None
         self._providers: list[str] = []
 
     @property
     def name(self) -> str:
-        return f"onnx-asr ({self._model_id})"
+        variant = f", {self._quantization}" if self._quantization else ""
+        return f"onnx-asr ({self._model_id}{variant})"
 
     def load(self) -> None:
         import onnx_asr
         import onnxruntime
+
+        try:
+            found = add_cuda_dll_directories()
+            log.debug("CUDA DLL directories added: %s", found or "none found")
+            # Adding the directories is not enough on Windows: onnxruntime loads
+            # the CUDA libraries by bare name from its own module directory, so
+            # they have to be pulled into the process first. Both steps are
+            # needed — the search path for the dependencies, this for the loads.
+            if found and hasattr(onnxruntime, "preload_dlls"):
+                onnxruntime.preload_dlls()
+        except Exception:  # never let a GPU nicety stop the app loading
+            log.debug("Could not preload the CUDA libraries", exc_info=True)
 
         advertised = onnxruntime.get_available_providers()
         log.info(
@@ -49,9 +152,10 @@ class OnnxBackend(STTBackend):
             )
 
         log.info(
-            "Loading %s with providers %s (first run downloads ~600 MB)",
+            "Loading %s with providers %s, %s intra-op thread(s) (first run downloads ~600 MB)",
             self.name,
             providers,
+            self._threads or "onnxruntime's default",
         )
         started = time.monotonic()
         try:
@@ -72,12 +176,54 @@ class OnnxBackend(STTBackend):
             log.debug("Provider failure detail", exc_info=True)
             self._load_with(onnx_asr, CPU_ONLY)
 
+        in_use = session_providers(self._model)
+        on_gpu = any(p != "CPUExecutionProvider" for p in in_use)
+        if "CUDAExecutionProvider" in providers and not on_gpu:
+            # The trap this whole dance exists for: onnxruntime accepts the
+            # provider, drops it when the session is built, and says nothing, so
+            # the app looks GPU-accelerated while every transcription is on the
+            # CPU. Ask the sessions, not the list we passed in.
+            log.warning(
+                "CUDA was requested but the sessions run on %s — transcription is on the CPU. "
+                "onnxruntime needs a full CUDA 13 + cuDNN 9 runtime; the pip wheels are "
+                "nvidia-cuda-runtime, nvidia-cublas, nvidia-cudnn-cu13 and nvidia-cufft "
+                "(the last from https://pypi.nvidia.com).",
+                ", ".join(sorted(in_use)) or "the CPU",
+            )
+
+        if self._quantization is None and not on_gpu and CPU_QUANTIZATION:
+            # Nothing accelerates this but quantisation now, and it is worth ~2x.
+            log.info("Reloading as %s: the CPU path is much faster quantised", CPU_QUANTIZATION)
+            self._quantization = CPU_QUANTIZATION
+            try:
+                self._load_with(onnx_asr, self._providers)
+            except Exception:
+                # No network on a first run, most likely: the quantised weights
+                # are a separate download. The model we already have works.
+                log.warning("Could not load the quantised model; keeping full precision")
+                log.debug("Quantised load failure", exc_info=True)
+                self._quantization = None
+
         log.info(
-            "Loaded %s in %.1fs using %s", self.name, time.monotonic() - started, self._providers
+            "Loaded %s in %.1fs using %s",
+            self.name,
+            time.monotonic() - started,
+            ", ".join(sorted(session_providers(self._model))) or self._providers,
         )
 
     def _load_with(self, onnx_asr, providers: list[str]) -> None:
-        self._model = onnx_asr.load_model(self._model_id, providers=providers)
+        import onnxruntime
+
+        options = None
+        if self._threads:
+            options = onnxruntime.SessionOptions()
+            options.intra_op_num_threads = self._threads
+        self._model = onnx_asr.load_model(
+            self._model_id,
+            providers=providers,
+            quantization=self._quantization,
+            sess_options=options,
+        )
         self._providers = providers
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
