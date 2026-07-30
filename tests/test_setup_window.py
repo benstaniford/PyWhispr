@@ -50,6 +50,7 @@ class TestCountingBytes:
         assert w._total_mb == setup_window.APPROXIMATE_MODEL_MB
 
 
+
 class TestOneBarOverEverything:
     def test_both_activities_share_one_bar(self, qtbot, monkeypatch):
         """A window each was two bars counting overlapping bytes."""
@@ -198,7 +199,8 @@ class TestStallDetection:
         process.kill.assert_called_once()
 
     def test_the_check_uses_full_precision(self, monkeypatch, tmp_path):
-        """int8 has no CUDA kernels, so the GPU is only proven on the weights it runs."""
+        """The only variant the GPU will run: int8 has no CUDA kernels, so a check on
+        it would prove something the app is never going to do."""
         w = worker(monkeypatch, tmp_path)
         process = MagicMock()
         process.poll.return_value = 0

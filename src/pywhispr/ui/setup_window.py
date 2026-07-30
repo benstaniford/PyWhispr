@@ -88,7 +88,12 @@ class _Worker(QObject):
             self.finished.emit(worked, detail)
 
     def _verify(self) -> tuple[bool, str]:
-        """Run the check, reporting the weights it downloads as it goes."""
+        """Run the check, reporting the weights it downloads as it goes.
+
+        Always on full precision: that is the only variant the GPU will ever run, it
+        has to be downloaded either way, and a check on other weights would prove
+        something the app is not going to do.
+        """
         self._process = cuda.start_verification(GPU_QUANTIZATION)
         seen = self._downloaded_mb()
         last_change = time.monotonic()
