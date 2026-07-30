@@ -482,6 +482,71 @@ class TestGpuOffer:
         app.tray.notify.assert_called_once()
 
 
+class TestGpuAskedBeforeAnyDownload:
+    """Asked after loading, the answer comes too late to save the wasted download."""
+
+    def _first_run(self, app, answer=True, cached=False):
+        app.cfg.offer_gpu_setup = True
+        app._load_model = MagicMock()
+        with (
+            patch("pywhispr.download.model_cached", return_value=cached),
+            patch("pywhispr.cuda.can_offer", return_value=(True, "")),
+            patch("pywhispr.ui.gpu_dialog.ask_to_enable", return_value=answer) as ask,
+            patch("pywhispr.app.save_config"),
+            patch.object(app, "_run_gpu_setup") as setup,
+            patch.object(app, "_begin_model_load") as load,
+        ):
+            deferred = app._offer_gpu_before_downloading()
+        return ask, setup, load, deferred
+
+    def test_accepting_holds_the_model_load_until_cuda_is_ready(self, app):
+        _, setup, load, deferred = self._first_run(app, answer=True)
+        assert deferred is True
+        setup.assert_called_once()
+        load.assert_not_called()  # otherwise int8 downloads alongside it
+
+    def test_accepting_switches_to_full_precision_first(self, app):
+        self._first_run(app, answer=True)
+        assert app.cfg.model_quantization == ""  # the GPU is slower on int8
+
+    def test_declining_loads_straight_away(self, app):
+        _, setup, _, deferred = self._first_run(app, answer=False)
+        assert deferred is False
+        setup.assert_not_called()
+
+    def test_not_asked_when_the_model_is_already_downloaded(self, app):
+        ask, _, _, deferred = self._first_run(app, cached=True)
+        ask.assert_not_called()
+        assert deferred is False
+
+    def test_a_failed_setup_falls_back_to_the_cpu_model(self, app):
+        app.cfg.model_quantization = ""
+        with (
+            patch("pywhispr.app.save_config"),
+            patch.object(app, "_begin_model_load") as load,
+        ):
+            app._on_gpu_setup_finished(worked=False)
+        assert app.cfg.model_quantization is None
+        load.assert_called_once()
+
+    def test_a_working_setup_loads_without_a_restart(self, app):
+        """The libraries landed before any session was built, so this process can use them."""
+        app.cfg.model_quantization = ""
+        with (
+            patch("pywhispr.app.save_config"),
+            patch.object(app, "_begin_model_load") as load,
+        ):
+            app._on_gpu_setup_finished(worked=True)
+        assert app.cfg.model_quantization == ""
+        load.assert_called_once()
+
+    def test_it_is_not_asked_twice_in_one_run(self, app):
+        self._first_run(app, answer=False)
+        with patch("pywhispr.ui.gpu_dialog.ask_to_enable") as ask:
+            app._maybe_offer_gpu()
+        ask.assert_not_called()
+
+
 class TestModelDownloadProgress:
     def test_shown_only_when_nothing_is_cached(self, app):
         with (

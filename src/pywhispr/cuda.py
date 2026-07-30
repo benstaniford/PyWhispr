@@ -231,24 +231,56 @@ def _self_command(*arguments: str) -> list[str]:
     return [sys.executable, "-m", "pywhispr", *arguments]
 
 
-def verify(timeout: float = 600.0) -> tuple[bool, str]:
-    """Load the model in a fresh process and report whether the GPU is really used.
+# Long enough to build CUDA sessions on a cold cuDNN, short enough that a wedged
+# check does not look like a hang. Nothing is downloaded under this timeout: the
+# weights are fetched first, where the user can see the bytes arriving.
+VERIFY_TIMEOUT = 240.0
+
+
+def start_verification(quantization: str | None = None) -> subprocess.Popen:
+    """Begin the check in a fresh process, returning it so it can be killed.
 
     Fresh on purpose: onnxruntime resolves providers once per process, so the app
     that just installed the libraries would keep reporting the CPU. Passing here
     means it will work on restart, which is what the user is told.
+
+    ``quantization`` names the variant to check with. Left unset the check picks
+    full precision, which is right for running but downloads 2.4 GB inside a step
+    the user sees only as "checking…" — and the provider is what is under test,
+    not the weights.
     """
+    arguments = ["verify-gpu"]
+    if quantization is not None:
+        arguments += ["--quantization", quantization]
+    return subprocess.Popen(
+        _self_command(*arguments),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def finish_verification(
+    process: subprocess.Popen, timeout: float = VERIFY_TIMEOUT
+) -> tuple[bool, str]:
+    """Wait for :func:`start_verification` and turn its output into a verdict."""
     try:
-        result = subprocess.run(
-            _self_command("verify-gpu"),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        out, err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
         return False, "the check did not finish in time"
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    detail = (result.stdout or result.stderr).strip().splitlines()
-    return result.returncode == 0, detail[-1] if detail else "no output"
+    detail = (out or err or "").strip().splitlines()
+    return process.returncode == 0, detail[-1] if detail else "no output"
+
+
+def verify(timeout: float = VERIFY_TIMEOUT, quantization: str | None = None) -> tuple[bool, str]:
+    """Run the check to completion. See :func:`start_verification`."""
+    try:
+        process = start_verification(quantization)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return finish_verification(process, timeout)

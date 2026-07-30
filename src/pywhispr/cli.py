@@ -39,7 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("enable-gpu", help="download the CUDA libraries for NVIDIA GPU acceleration")
     sub.add_parser("disable-gpu", help="remove the downloaded CUDA libraries")
-    sub.add_parser("verify-gpu", help="report whether transcription really runs on the GPU")
+    p_verify = sub.add_parser(
+        "verify-gpu", help="report whether transcription really runs on the GPU"
+    )
+    p_verify.add_argument(
+        "--quantization",
+        default=None,
+        help="model variant to check with (default: whatever the config says). "
+        "The check only needs a model the GPU can load, so passing the variant "
+        "already downloaded avoids fetching another one.",
+    )
 
     sub.add_parser(
         "diagnose", help="print environment details and test-load the model (for bug reports)"
@@ -89,16 +98,19 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_disable_gpu()
 
     if command == "verify-gpu":
-        return _cmd_verify_gpu()
+        return _cmd_verify_gpu(args.quantization)
 
     return 2
 
 
-def _load_backend():
+def _load_backend(quantization: str | None = None):
     from pywhispr.config import load_config
     from pywhispr.stt import create_backend
 
-    backend = create_backend(load_config())
+    config = load_config()
+    if quantization is not None:
+        config.model_quantization = quantization
+    backend = create_backend(config)
     log.info("Loading model (%s)...", backend.name)
     backend.load()
     return backend
@@ -189,18 +201,22 @@ def _cmd_disable_gpu() -> int:
     return 0
 
 
-def _cmd_verify_gpu() -> int:
+def _cmd_verify_gpu(quantization: str | None = None) -> int:
     """Load the model here and now, and report the providers actually in use.
 
     Run in a subprocess by `cuda.verify()`, so its output is a single line and its
     exit code is the answer: onnxruntime only resolves providers once per process,
     which is why this cannot be checked in the app that just installed them.
+
+    ``quantization`` exists so the check can reuse the variant already downloaded.
+    Left to itself it would see working CUDA, choose full precision and fetch 2.4 GB
+    inside a step the user is only being shown as "checking…".
     """
     import numpy as np
 
     from pywhispr.stt.onnx_backend import session_providers
 
-    backend = _load_backend()
+    backend = _load_backend(quantization)
     providers = session_providers(getattr(backend, "_model", None))
     accelerated = sorted(p for p in providers if p != "CPUExecutionProvider")
     if not accelerated:

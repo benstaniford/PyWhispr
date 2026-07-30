@@ -159,26 +159,50 @@ class TestDownload:
         assert cuda.remove() is False
 
 
+def fake_process(returncode=0, stdout="", stderr=""):
+    process = MagicMock()
+    process.returncode = returncode
+    process.poll.return_value = returncode
+    process.communicate.return_value = (stdout, stderr)
+    return process
+
+
 class TestVerify:
     """Installed is not working, and only working may be reported."""
 
     def test_reports_success_from_the_exit_code(self):
-        result = MagicMock(returncode=0, stdout="transcription runs on the GPU via CUDA\n", stderr="")
-        with patch("subprocess.run", return_value=result):
+        process = fake_process(0, "transcription runs on the GPU via CUDA\n")
+        with patch("subprocess.Popen", return_value=process):
             assert cuda.verify() == (True, "transcription runs on the GPU via CUDA")
 
     def test_reports_failure_with_the_reason(self):
-        result = MagicMock(returncode=1, stdout="runs on the CPU: no GPU provider\n", stderr="")
-        with patch("subprocess.run", return_value=result):
+        process = fake_process(1, "runs on the CPU: no GPU provider\n")
+        with patch("subprocess.Popen", return_value=process):
             worked, detail = cuda.verify()
         assert worked is False
         assert "CPU" in detail
 
-    def test_a_hung_check_is_a_failure(self):
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("x", 1)):
-            worked, detail = cuda.verify()
+    def test_a_hung_check_is_killed_and_is_a_failure(self):
+        process = fake_process(0)
+        process.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("", "")]
+        with patch("subprocess.Popen", return_value=process):
+            worked, detail = cuda.verify(timeout=0.01)
         assert worked is False
         assert "in time" in detail
+        process.kill.assert_called_once()  # a wedged check must not outlive the wait
+
+    def test_the_variant_is_passed_so_nothing_extra_is_downloaded(self):
+        """Left to itself the check picks full precision and fetches 2.4 GB."""
+        with patch("subprocess.Popen", return_value=fake_process()) as popen:
+            cuda.verify(quantization="int8")
+        command = popen.call_args.args[0]
+        assert command[-2:] == ["--quantization", "int8"]
+
+    def test_the_process_is_returned_so_it_can_be_killed(self):
+        """Cancelling used to wait out the whole download."""
+        with patch("subprocess.Popen", return_value=fake_process()) as popen:
+            process = cuda.start_verification()
+        assert process is popen.return_value
 
     def test_runs_a_fresh_process_of_this_program(self):
         assert cuda._self_command("verify-gpu")[-1] == "verify-gpu"

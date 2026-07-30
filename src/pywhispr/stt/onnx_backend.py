@@ -145,6 +145,11 @@ class OnnxBackend(STTBackend):
         return f"onnx-asr ({self._model_id}{variant})"
 
     @property
+    def quantization(self) -> str | None:
+        """The variant in use, once chosen: None is full precision."""
+        return self._quantization
+
+    @property
     def download_mb(self) -> int:
         """Roughly what a first run will fetch, for the progress window."""
         return DOWNLOAD_MB.get(self._quantization, DOWNLOAD_MB[None])

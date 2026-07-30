@@ -77,6 +77,8 @@ class PyWhisprApp(QObject):
         )
         self._gpu_dialog = None  # kept alive while the download runs
         self._download_dialog = None
+        self._load_model = None  # set by start(), possibly deferred behind GPU setup
+        self._asked_about_gpu = False
         # Rebound wholesale (never mutated) when the editor saves, so the API's
         # request threads can read it without a lock.
         self._vocab: list[Rule] = load_vocabulary()
@@ -176,9 +178,72 @@ class PyWhisprApp(QObject):
                 log.exception("Model load failed after %.1fs", time.monotonic() - started)
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
+        self._load_model = load
+        if self._offer_gpu_before_downloading():
+            return  # the model load waits for the CUDA setup to finish
+        self._begin_model_load()
+
+    def _begin_model_load(self) -> None:
         log.info("Loading %s (a first run downloads the model)...", self.backend.name)
         self._show_model_download()
-        self._worker.submit(load)
+        self._worker.submit(self._load_model)
+
+    def _offer_gpu_before_downloading(self) -> bool:
+        """Ask about the GPU first, while the choice still saves a download.
+
+        Asked after loading — as it used to be — the answer arrives too late: the
+        quantised weights the GPU has no use for are already on disk. True means the
+        setup is running and will start the model load when it is done.
+        """
+        from pywhispr.cuda import can_offer
+        from pywhispr.download import model_cached
+
+        if model_cached() or not self.cfg.offer_gpu_setup:
+            return False
+        worth_it, why_not = can_offer()
+        if not worth_it:
+            log.debug("Not offering GPU acceleration: %s", why_not)
+            return False
+
+        from pywhispr.ui.gpu_dialog import ask_to_enable
+
+        self._asked_about_gpu = True
+        answer = ask_to_enable()
+        if answer is None:
+            self.cfg.offer_gpu_setup = False
+            save_config(self.cfg)
+            log.info("GPU acceleration declined for good")
+        if not answer:
+            return False
+
+        # Full precision from here on: the GPU is slower on the quantised weights,
+        # so fetching them as well would be the waste this ordering avoids.
+        self.cfg.model_quantization = ""
+        save_config(self.cfg)
+        self.backend = create_backend(self.cfg)
+        self._gpu_dialog = self._run_gpu_setup()
+        return True
+
+    def _run_gpu_setup(self):
+        from pywhispr.ui.gpu_dialog import run_setup
+
+        dialog = run_setup()
+        dialog.setup_finished.connect(self._on_gpu_setup_finished)
+        return dialog
+
+    def _on_gpu_setup_finished(self, worked: bool) -> None:
+        """The libraries are in place (or are not), so the model can load now.
+
+        Loading in this process rather than after a restart is deliberate:
+        onnxruntime resolves providers when a session is built, and the libraries
+        arrived before that happened.
+        """
+        if not worked:
+            self.cfg.model_quantization = None
+            save_config(self.cfg)
+            self.backend = create_backend(self.cfg)
+            log.info("GPU setup did not work out; loading the CPU model instead")
+        self._begin_model_load()
 
     def _show_model_download(self) -> None:
         """On a first run, show the download rather than a silent "Loading…"."""
@@ -198,8 +263,10 @@ class PyWhisprApp(QObject):
             except Exception:
                 log.debug("Could not pick the model variant early", exc_info=True)
 
+        from pywhispr.ui.foreground import show_in_front
+
         self._download_dialog = ModelDownloadDialog(self.backend.download_mb)
-        self._download_dialog.show()
+        show_in_front(self._download_dialog)
 
     def _finish_model_download(self, message: str | None = None) -> None:
         if self._download_dialog is not None:
@@ -279,11 +346,15 @@ class PyWhisprApp(QObject):
     # -- GPU acceleration ----------------------------------------------------
 
     def _maybe_offer_gpu(self) -> None:
-        """Offer the CUDA download once, if this machine would benefit."""
+        """Offer the CUDA download once, if this machine would benefit.
+
+        This is the path for an existing install, where the model is already
+        downloaded and there is nothing left to save by asking first.
+        """
         from pywhispr.cuda import can_offer
         from pywhispr.stt.onnx_backend import session_providers
 
-        if not self.cfg.offer_gpu_setup:
+        if not self.cfg.offer_gpu_setup or self._asked_about_gpu:
             return
         providers = session_providers(getattr(self.backend, "_model", None))
         if any(p != "CPUExecutionProvider" for p in providers):
@@ -299,7 +370,9 @@ class PyWhisprApp(QObject):
         from pywhispr.ui.gpu_dialog import ask_to_enable, run_setup
 
         if self._gpu_dialog is not None and self._gpu_dialog.isVisible():
-            self._gpu_dialog.raise_()
+            from pywhispr.ui.foreground import show_in_front
+
+            show_in_front(self._gpu_dialog)
             return
         worth_it, why_not = can_offer()
         if asked_by_user and not worth_it and not is_installed():

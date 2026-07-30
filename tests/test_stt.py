@@ -61,6 +61,12 @@ class TestOnnxProviderFallback:
         onnx_asr.load_model.return_value = fake_model("CPUExecutionProvider")
         monkeypatch.setitem(sys.modules, "onnxruntime", onnxruntime)
         monkeypatch.setitem(sys.modules, "onnx_asr", onnx_asr)
+        # Otherwise the real probe runs and the result depends on whether this
+        # developer's machine has CUDA — which made these tests fail differently on
+        # each run while enable-gpu was mid-download. Tests wanting it override.
+        from pywhispr.stt import onnx_backend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
         return onnx_asr, onnxruntime
 
     def _backend(self):
@@ -170,6 +176,7 @@ class TestOnnxProviderFallback:
 
     def test_cuda_dll_directories_are_added_from_the_nvidia_wheels(self, tmp_path, monkeypatch):
         """The pip CUDA wheels hide their DLLs where nothing searches."""
+        import pywhispr.cuda
         from pywhispr.stt import onnx_backend
 
         libs = tmp_path / "cu13" / "bin" / "x86_64"
@@ -182,6 +189,9 @@ class TestOnnxProviderFallback:
         monkeypatch.setattr(onnx_backend.sys, "platform", "win32")
         monkeypatch.setattr(onnx_backend.importlib.util, "find_spec", lambda name: spec)
         monkeypatch.setattr(onnx_backend.os, "add_dll_directory", added.append, raising=False)
+        # Otherwise a developer who has run enable-gpu gets their own CUDA
+        # directory in the result and the test fails on their machine only.
+        monkeypatch.setattr(pywhispr.cuda, "install_dir", lambda: tmp_path / "not-installed")
 
         assert onnx_backend.add_cuda_dll_directories() == [str(libs)]
         assert added == [str(libs)]  # only the directory that has DLLs in it
