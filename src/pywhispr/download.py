@@ -43,6 +43,32 @@ def cache_bytes() -> int:
     return total
 
 
+def start_model_download(quantization: str | None = None):
+    """Fetch the weights in a separate process, returned so it can be killed.
+
+    A step of its own, before anything is verified: the download is the long part
+    and belongs on the progress bar, where the check that follows it is seconds.
+
+    Output goes nowhere on purpose. A pipe nobody reads while waiting fills up —
+    huggingface_hub writes progress bars to stderr — and then the child blocks on
+    write forever, at whatever byte it had reached. The child logs to the same file
+    we do, so nothing is lost.
+    """
+    import subprocess
+
+    from pywhispr.cuda import self_command
+
+    arguments = ["download"]
+    if quantization is not None:
+        arguments += ["--quantization", quantization]
+    return subprocess.Popen(
+        self_command(*arguments),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
 def model_cached(minimum_mb: int = 400) -> bool:
     """Is a model already downloaded, so no progress needs showing?
 

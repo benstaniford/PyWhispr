@@ -35,7 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--seconds", type=float, default=5.0, help="recording duration (default: 5)"
     )
 
-    sub.add_parser("download", help="pre-download the speech-to-text model")
+    p_download = sub.add_parser("download", help="pre-download the speech-to-text model")
+    p_download.add_argument(
+        "--quantization",
+        default=None,
+        help='model variant to fetch ("int8", or "" for full precision); '
+        "default: whatever the config says",
+    )
 
     sub.add_parser("enable-gpu", help="download the CUDA libraries for NVIDIA GPU acceleration")
     sub.add_parser("disable-gpu", help="remove the downloaded CUDA libraries")
@@ -86,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_record(args.seconds)
 
     if command == "download":
-        return _cmd_download()
+        return _cmd_download(args.quantization)
 
     if command == "diagnose":
         return _cmd_diagnose()
@@ -156,8 +162,8 @@ def _cmd_record(seconds: float) -> int:
     return 0
 
 
-def _cmd_download() -> int:
-    _load_backend()
+def _cmd_download(quantization: str | None = None) -> int:
+    _load_backend(quantization)
     print("Model downloaded and loaded successfully.")
     return 0
 

@@ -56,7 +56,7 @@ class TestOneBarOverEverything:
         """A window each was two bars counting overlapping bytes."""
         w = window(qtbot, monkeypatch)
         w.track_model_download(expected_mb=100)
-        w._on_gpu_progress(300, 900, "GPU acceleration")
+        w._on_gpu_progress(300, 900)
 
         monkeypatch.setattr(setup_window, "cache_bytes", lambda: 50 * setup_window.MEGABYTE)
         w._poll_model()
@@ -76,7 +76,7 @@ class TestOneBarOverEverything:
     def test_overshooting_the_estimate_goes_busy_rather_than_pretending(self, qtbot, monkeypatch):
         """It read "3903 of about 3650 MB" at 99%, which is two lies for one bug."""
         w = window(qtbot, monkeypatch)
-        w._on_gpu_progress(4000, 3650, "GPU acceleration")
+        w._on_gpu_progress(4000, 3650)
         assert w._bar.maximum() == 0  # indeterminate
 
 
@@ -188,26 +188,150 @@ class TestStallDetection:
         w = worker(monkeypatch, tmp_path)
         process = MagicMock()
         process.poll.return_value = None  # never exits
-        monkeypatch.setattr(setup_window.cuda, "start_verification", lambda q: process)
         monkeypatch.setattr(setup_window, "POLL_SECONDS", 0)
         monkeypatch.setattr(setup_window, "STALL_SECONDS", -1)  # already stalled
 
-        worked, detail = w._verify()
+        worked, detail = w._await(process)
 
         assert worked is False
         assert "progress" in detail
         process.kill.assert_called_once()
 
-    def test_the_check_uses_full_precision(self, monkeypatch, tmp_path):
-        """The only variant the GPU will run: int8 has no CUDA kernels, so a check on
-        it would prove something the app is never going to do."""
-        w = worker(monkeypatch, tmp_path)
+
+class TestTheOrderOfTheSteps:
+    """Download first, verify last: the check is then seconds, not 2.4 GB."""
+
+    def _run(self, monkeypatch, tmp_path, verdict=(True, "via CUDA")):
+        w = worker(monkeypatch, tmp_path, cuda_installed=True)  # libraries already there
         process = MagicMock()
         process.poll.return_value = 0
+        order = []
+
+        def start_download(quantization):
+            order.append("download")
+            return process
+
+        monkeypatch.setattr(
+            setup_window, "start_model_download", MagicMock(side_effect=start_download)
+        )
         monkeypatch.setattr(
             setup_window.cuda, "start_verification", MagicMock(return_value=process)
         )
-        monkeypatch.setattr(setup_window.cuda, "finish_verification", lambda p: (True, "via CUDA"))
+        monkeypatch.setattr(setup_window.cuda, "finish_verification", lambda p: verdict)
+        w.checking.connect(lambda: order.append("checking"))
+        outcome = []
+        w.finished.connect(lambda worked, detail: outcome.append((worked, detail)))
+        w.run()
+        return w, order, outcome
 
-        assert w._verify() == (True, "via CUDA")
+    def test_the_weights_come_down_before_anything_is_checked(self, monkeypatch, tmp_path):
+        _, order, _ = self._run(monkeypatch, tmp_path)
+        assert order == ["download", "checking"]
+
+    def test_both_steps_use_full_precision(self, monkeypatch, tmp_path):
+        """The only variant the GPU will run: int8 has no CUDA kernels, so checking on
+        it would prove something the app is never going to do."""
+        self._run(monkeypatch, tmp_path)
+        setup_window.start_model_download.assert_called_once_with(setup_window.GPU_QUANTIZATION)
         setup_window.cuda.start_verification.assert_called_once_with(setup_window.GPU_QUANTIZATION)
+
+    def test_a_failed_download_is_not_followed_by_a_check(self, monkeypatch, tmp_path):
+        w = worker(monkeypatch, tmp_path, cuda_installed=True)
+        process = MagicMock()
+        process.poll.return_value = 1
+        monkeypatch.setattr(setup_window, "start_model_download", lambda q: process)
+        monkeypatch.setattr(setup_window.cuda, "finish_verification", lambda p: (False, "offline"))
+        outcome = []
+        w.finished.connect(lambda worked, detail: outcome.append((worked, detail)))
+
+        with patch.object(setup_window.cuda, "start_verification") as verify:
+            w.run()
+
+        verify.assert_not_called()
+        assert outcome == [(False, "offline")]
+
+
+class TestFeedbackWhileNoBytesMove:
+    """A frozen number reads as a hang: 72 seconds of it, measured, extracting cuDNN."""
+
+    def test_a_step_is_captioned_and_the_bar_runs_busy(self, qtbot, monkeypatch):
+        w = window(qtbot, monkeypatch)
+        w._on_gpu_progress(500, 3650)
+
+        w._on_step("Installing nvidia-cudnn-cu13…")
+
+        assert "installing nvidia-cudnn-cu13" in w._gpu_line.text()
+        assert w._bar.maximum() == 0  # busy, not stuck at a number
+
+    def test_bytes_arriving_again_restore_the_count(self, qtbot, monkeypatch):
+        w = window(qtbot, monkeypatch)
+        w._on_step("Installing nvidia-cudnn-cu13…")
+        w._on_gpu_progress(1500, 3650)
+        assert w._bar.maximum() == 1000
+        assert "1500 of about 3650 MB" in w._gpu_line.text()
+
+    def test_extraction_and_lookup_are_reported_but_not_every_chunk(
+        self, monkeypatch, tmp_path
+    ):
+        """Per-chunk messages would fight the byte counter for the same label."""
+        w = worker(monkeypatch, tmp_path)
+        seen = []
+        w.step.connect(seen.append)
+
+        w._step("Finding nvidia-cublas…")
+        w._step("Downloading nvidia-cublas (12 of 400 MB)…")
+        w._step("Installing nvidia-cublas…")
+
+        assert seen == ["Finding nvidia-cublas…", "Installing nvidia-cublas…"]
+
+    def test_the_model_download_starting_up_says_so(self, monkeypatch, tmp_path):
+        """Its subprocess takes a while to import onnxruntime before a byte lands."""
+        w = worker(monkeypatch, tmp_path, cuda_installed=True)
+        process = MagicMock()
+        process.poll.return_value = 0
+        monkeypatch.setattr(setup_window, "start_model_download", lambda q: process)
+        monkeypatch.setattr(setup_window.cuda, "start_verification", lambda q: process)
+        monkeypatch.setattr(setup_window.cuda, "finish_verification", lambda p: (True, "ok"))
+        seen = []
+        w.step.connect(seen.append)
+
+        w.run()
+
+        assert seen == ["Starting the speech model download…"]
+
+
+class TestQuietPeriods:
+    """Hugging Face commits blobs in chunks: 11 updates across 2431 MB, 70s apart."""
+
+    def test_a_still_count_makes_the_bar_busy_rather_than_frozen(self, qtbot, monkeypatch):
+        w = window(qtbot, monkeypatch)
+        w._on_gpu_progress(500, 3650)
+        assert w._bar.maximum() == 1000
+
+        monkeypatch.setattr(type(w), "gpu_running", property(lambda self: True))
+        w._last_progress_at -= setup_window.QUIET_SECONDS + 1
+        w._watch_for_quiet()
+
+        assert w._bar.maximum() == 0
+        assert "500 of about 3650 MB" in w._gpu_line.text()  # the last thing known
+
+    def test_a_quiet_period_with_nothing_running_is_left_alone(self, qtbot, monkeypatch):
+        """Otherwise the finished window would sit there with a spinning bar."""
+        w = window(qtbot, monkeypatch)
+        w._on_gpu_progress(500, 3650)
+        w._last_progress_at -= setup_window.QUIET_SECONDS + 1
+        w._watch_for_quiet()  # gpu_running is False here
+        assert w._bar.maximum() == 1000
+
+
+class TestTheBarDisappearsForTheCheck:
+    def test_verifying_has_no_bar(self, qtbot, monkeypatch):
+        """Nothing is being measured any more, so a bar would be theatre."""
+        w = window(qtbot, monkeypatch)
+        w._on_gpu_progress(500, 3650)
+        assert w._bar.isVisibleTo(w)
+
+        w._on_checking()
+
+        assert not w._bar.isVisibleTo(w)
+        assert w._gpu_line.text() == "Verifying GPU acceleration…"

@@ -159,32 +159,55 @@ class TestDownload:
         assert cuda.remove() is False
 
 
-def fake_process(returncode=0, stdout="", stderr=""):
+def fake_process(returncode=0, output="", tmp_path=None):
+    """A finished process whose output is in a file, as the real one's is.
+
+    Not a pipe: the caller polls for cancellation rather than reading, and a pipe
+    nobody drains fills up and blocks the child mid-write.
+    """
     process = MagicMock()
     process.returncode = returncode
     process.poll.return_value = returncode
-    process.communicate.return_value = (stdout, stderr)
+    if tmp_path is not None:
+        path = tmp_path / "verify.log"
+        path.write_text(output, encoding="utf-8")
+        process.pywhispr_output = open(path, "r+", encoding="utf-8")  # noqa: SIM115
+    else:
+        del process.pywhispr_output  # getattr() must find nothing
     return process
 
 
 class TestVerify:
     """Installed is not working, and only working may be reported."""
 
-    def test_reports_success_from_the_exit_code(self):
-        process = fake_process(0, "transcription runs on the GPU via CUDA\n")
-        with patch("subprocess.Popen", return_value=process):
-            assert cuda.verify() == (True, "transcription runs on the GPU via CUDA")
+    def test_reports_success_from_the_exit_code(self, tmp_path):
+        process = fake_process(0, "transcription runs on the GPU via CUDA\n", tmp_path)
+        assert cuda.finish_verification(process) == (
+            True,
+            "transcription runs on the GPU via CUDA",
+        )
 
-    def test_reports_failure_with_the_reason(self):
-        process = fake_process(1, "runs on the CPU: no GPU provider\n")
-        with patch("subprocess.Popen", return_value=process):
-            worked, detail = cuda.verify()
+    def test_reports_failure_with_the_reason(self, tmp_path):
+        process = fake_process(1, "runs on the CPU: no GPU provider\n", tmp_path)
+        worked, detail = cuda.finish_verification(process)
         assert worked is False
         assert "CPU" in detail
 
-    def test_a_hung_check_is_killed_and_is_a_failure(self):
-        process = fake_process(0)
-        process.communicate.side_effect = [subprocess.TimeoutExpired("x", 1), ("", "")]
+    def test_the_last_line_is_the_verdict(self, tmp_path):
+        """The log above it is onnxruntime's chatter, now in the same stream."""
+        process = fake_process(0, "warning: something\nruns on the GPU via CUDA\n", tmp_path)
+        assert cuda.finish_verification(process)[1] == "runs on the GPU via CUDA"
+
+    def test_output_goes_to_a_file_not_a_pipe(self, tmp_path):
+        """An undrained pipe fills up and wedges the child — the 2431 MB hang."""
+        with patch("subprocess.Popen", return_value=fake_process(tmp_path=tmp_path)) as popen:
+            cuda.start_verification()
+        assert popen.call_args.kwargs["stdout"] is not subprocess.PIPE
+        assert popen.call_args.kwargs["stderr"] is subprocess.STDOUT
+
+    def test_a_hung_check_is_killed_and_is_a_failure(self, tmp_path):
+        process = fake_process(0, tmp_path=tmp_path)
+        process.wait.side_effect = [subprocess.TimeoutExpired("x", 1), 0]
         with patch("subprocess.Popen", return_value=process):
             worked, detail = cuda.verify(timeout=0.01)
         assert worked is False
@@ -205,4 +228,4 @@ class TestVerify:
         assert process is popen.return_value
 
     def test_runs_a_fresh_process_of_this_program(self):
-        assert cuda._self_command("verify-gpu")[-1] == "verify-gpu"
+        assert cuda.self_command("verify-gpu")[-1] == "verify-gpu"

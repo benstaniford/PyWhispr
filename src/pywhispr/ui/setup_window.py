@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from pywhispr import cuda
-from pywhispr.download import APPROXIMATE_MODEL_MB, cache_bytes
+from pywhispr.download import APPROXIMATE_MODEL_MB, cache_bytes, start_model_download
 from pywhispr.ui.foreground import show_in_front
 
 log = logging.getLogger(__name__)
@@ -42,11 +42,22 @@ GPU_QUANTIZATION = ""
 # bounded is silence: no new bytes and no exit for this long is a hang.
 STALL_SECONDS = 240.0
 
+# How long the byte count may stand still before the bar goes busy rather than
+# looking frozen. Well under STALL_SECONDS: this is presentation, not a verdict.
+QUIET_SECONDS = 4.0
+
 
 class _Worker(QObject):
-    """Downloads the CUDA libraries and proves the GPU is really used."""
+    """Three steps, in this order: CUDA libraries, model weights, then the check.
 
-    progress = Signal(int, int, str)  # downloaded MB, total MB, what is happening
+    The download is the long part, so it happens as its own visible step and the
+    check that follows it is a session build and one transcription — seconds. Doing
+    it the other way round hid a 2.4 GB download behind the word "checking".
+    """
+
+    progress = Signal(int, int)  # downloaded MB, total MB — libraries and weights
+    step = Signal(str)  # what is happening while no bytes are moving
+    checking = Signal()  # downloading is done; the bar has nothing left to show
     finished = Signal(bool, str)  # worked, detail
 
     def __init__(self) -> None:
@@ -61,7 +72,7 @@ class _Worker(QObject):
             self._total_mb += cuda.APPROXIMATE_DOWNLOAD_MB
 
     def cancel(self) -> None:
-        """Stop as soon as possible, including killing the check if it is running."""
+        """Stop as soon as possible, including killing whatever step is running."""
         self._cancelled = True
         process = self._process
         if process is not None and process.poll() is None:
@@ -78,7 +89,18 @@ class _Worker(QObject):
             if self._cancelled:
                 self.finished.emit(False, "Cancelled.")
                 return
-            worked, detail = self._verify()
+
+            # Full precision: the only variant the GPU will ever run, so it has to
+            # come down either way and int8 would prove the wrong thing. Downloaded
+            # as its own step so the bar covers it, rather than inside the check.
+            self.step.emit("Starting the speech model download…")
+            ok, detail = self._await(start_model_download(GPU_QUANTIZATION))
+            if not ok:
+                self.finished.emit(False, detail)
+                return
+
+            self.checking.emit()
+            worked, detail = self._await(cuda.start_verification(GPU_QUANTIZATION))
         except KeyboardInterrupt:
             self.finished.emit(False, "Cancelled.")
         except Exception as exc:
@@ -87,31 +109,29 @@ class _Worker(QObject):
         else:
             self.finished.emit(worked, detail)
 
-    def _verify(self) -> tuple[bool, str]:
-        """Run the check, reporting the weights it downloads as it goes.
+    def _await(self, process) -> tuple[bool, str]:
+        """Wait for a step, cancellable, bounded by silence rather than by a clock.
 
-        Always on full precision: that is the only variant the GPU will ever run, it
-        has to be downloaded either way, and a check on other weights would prove
-        something the app is not going to do.
+        A 2.4 GB download is slow but fine; no new bytes and no exit is a hang.
         """
-        self._process = cuda.start_verification(GPU_QUANTIZATION)
+        self._process = process
         seen = self._downloaded_mb()
         last_change = time.monotonic()
-        while self._process.poll() is None:
+        while process.poll() is None:
             time.sleep(POLL_SECONDS)
             if self._cancelled:
                 return False, "Cancelled."
             downloaded = self._downloaded_mb()
             if downloaded != seen:
                 seen, last_change = downloaded, time.monotonic()
+                self.progress.emit(downloaded, self._total_mb)
             elif time.monotonic() - last_change > STALL_SECONDS:
-                self._process.kill()
-                return False, "the download stopped making progress"
-            self._emit(downloaded)
-        return cuda.finish_verification(self._process)
+                process.kill()
+                return False, "it stopped making progress"
+        return cuda.finish_verification(process)
 
     def _downloaded_mb(self) -> int:
-        """Wheels as they stream, weights as they land.
+        """Wheels as they stream, weights as they land — one rising number.
 
         Wheel bytes come from the downloader rather than the installed files, which
         are half again bigger and only appear once each wheel is extracted.
@@ -121,13 +141,14 @@ class _Worker(QObject):
 
     def _on_wheel_bytes(self, total: int) -> None:
         self._wheel_bytes = total
-        self._emit(self._downloaded_mb())
-
-    def _emit(self, downloaded_mb: int) -> None:
-        self.progress.emit(downloaded_mb, self._total_mb, "GPU acceleration")
+        self.progress.emit(self._downloaded_mb(), self._total_mb)
 
     def _step(self, message: str) -> bool:
+        """Wheel-level progress. The byte count stands still while a wheel extracts —
+        cuDNN takes over a minute — so the step itself is what there is to report."""
         log.debug("GPU setup: %s", message)
+        if message.startswith(("Finding", "Installing")):
+            self.step.emit(message)
         return not self._cancelled
 
 
@@ -173,6 +194,8 @@ class SetupWindow(QDialog):
         self._worker = None
         self._cancel_button = None
         self._first_run = False
+        self._quiet_timer = None
+        self._last_progress_at = 0.0
 
     # -- the speech model ----------------------------------------------------
 
@@ -216,11 +239,19 @@ class SetupWindow(QDialog):
         self._cancel_button = self._buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         self._cancel_button.clicked.connect(self._cancel_gpu)
 
+        self._last_progress_at = time.monotonic()
+        self._quiet_timer = QTimer(self)
+        self._quiet_timer.setInterval(1000)
+        self._quiet_timer.timeout.connect(self._watch_for_quiet)
+        self._quiet_timer.start()
+
         self._worker = _Worker()
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_gpu_progress)
+        self._worker.step.connect(self._on_step)
+        self._worker.checking.connect(self._on_checking)
         self._worker.finished.connect(self._on_gpu_finished)
         self._thread.start()
 
@@ -235,9 +266,41 @@ class SetupWindow(QDialog):
         if self._worker is not None:
             self._worker.cancel()
 
-    def _on_gpu_progress(self, downloaded_mb: int, total_mb: int, _what: str) -> None:
+    def _on_gpu_progress(self, downloaded_mb: int, total_mb: int) -> None:
         self._gpu_done, self._gpu_total = downloaded_mb, total_mb
-        self._gpu_line.setText(f"GPU acceleration — {downloaded_mb} of about {total_mb} MB.")
+        self._last_progress_at = time.monotonic()
+        self._gpu_line.setText(
+            f"GPU acceleration — downloading {downloaded_mb} of about {total_mb} MB."
+        )
+        self._refresh_bar()
+
+    def _watch_for_quiet(self) -> None:
+        """Show motion while the byte count stands still.
+
+        Hugging Face commits its blobs in large chunks, so the count jumps rather
+        than climbs — measured at 11 updates across 2431 MB, with 70s between two of
+        them. A bar frozen that long reads as a hang, so it goes busy instead; the
+        number stays as the last thing actually known.
+        """
+        if not self.gpu_running or self._gpu_total <= 0:
+            return
+        if time.monotonic() - self._last_progress_at > QUIET_SECONDS:
+            self._bar.setRange(0, 0)
+
+    def _on_step(self, message: str) -> None:
+        """No bytes are moving, so say what is happening and let the bar run busy.
+
+        A frozen number for 72 seconds — measured, extracting cuDNN — reads as a
+        hang; a moving bar with a caption does not.
+        """
+        self._gpu_line.setText(f"GPU acceleration — {message[0].lower()}{message[1:]}")
+        self._bar.show()
+        self._bar.setRange(0, 0)
+
+    def _on_checking(self) -> None:
+        """Downloading done. Nothing left to measure, so the bar goes away."""
+        self._gpu_done = self._gpu_total = 0
+        self._gpu_line.setText("Verifying GPU acceleration…")
         self._refresh_bar()
 
     def _on_gpu_finished(self, worked: bool, detail: str) -> None:
@@ -245,6 +308,9 @@ class SetupWindow(QDialog):
         # The verdict used to live only in a label, so a failure the user closed left
         # no trace anywhere.
         log.info("GPU setup finished: worked=%s (%s)", worked, detail)
+        if self._quiet_timer is not None:
+            self._quiet_timer.stop()
+            self._quiet_timer = None
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(5000)
@@ -267,7 +333,9 @@ class SetupWindow(QDialog):
         total = self._model_total + self._gpu_total
         done = self._model_done + self._gpu_done
         if total <= 0:
+            self._bar.hide()  # nothing is downloading: a bar would be theatre
             return
+        self._bar.show()
         if done >= total:
             self._bar.setRange(0, 0)  # past the estimate: busy rather than a fake 99%
             return
@@ -282,7 +350,6 @@ class SetupWindow(QDialog):
         if not failed:
             self.accept()
             return
-        self._bar.hide()
         self._hide_button.hide()
         close = self._buttons.addButton(QDialogButtonBox.StandardButton.Close)
         close.clicked.connect(self.accept)

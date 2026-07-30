@@ -23,7 +23,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 from platformdirs import user_data_dir
 
@@ -234,7 +234,7 @@ def remove() -> bool:
 # -- proving it works ---------------------------------------------------------
 
 
-def _self_command(*arguments: str) -> list[str]:
+def self_command(*arguments: str) -> list[str]:
     """This program plus arguments: packaged exe, or `python -m pywhispr`."""
     if getattr(sys, "frozen", False):
         return [sys.executable, *arguments]
@@ -262,13 +262,32 @@ def start_verification(quantization: str | None = None) -> subprocess.Popen:
     arguments = ["verify-gpu"]
     if quantization is not None:
         arguments += ["--quantization", quantization]
-    return subprocess.Popen(
-        _self_command(*arguments),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    # A file rather than a pipe: the caller polls for cancellation instead of
+    # reading, and an undrained pipe fills up and blocks the child mid-write.
+    output = NamedTemporaryFile(  # noqa: SIM115 - closed by finish_verification
+        prefix="pywhispr-verify-", suffix=".log", mode="w+", delete=False
+    )
+    process = subprocess.Popen(
+        self_command(*arguments),
+        stdout=output,
+        stderr=subprocess.STDOUT,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    process.pywhispr_output = output  # type: ignore[attr-defined]
+    return process
+
+
+def _read_output(process: subprocess.Popen) -> str:
+    output = getattr(process, "pywhispr_output", None)
+    if output is None:
+        return ""
+    try:
+        output.close()
+        text = Path(output.name).read_text(encoding="utf-8", errors="replace")
+        Path(output.name).unlink(missing_ok=True)
+        return text
+    except OSError:
+        return ""
 
 
 def finish_verification(
@@ -276,14 +295,15 @@ def finish_verification(
 ) -> tuple[bool, str]:
     """Wait for :func:`start_verification` and turn its output into a verdict."""
     try:
-        out, err = process.communicate(timeout=timeout)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.communicate()
+        process.wait()
+        _read_output(process)
         return False, "the check did not finish in time"
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    detail = (out or err or "").strip().splitlines()
+    detail = _read_output(process).strip().splitlines()
     return process.returncode == 0, detail[-1] if detail else "no output"
 
 
