@@ -17,6 +17,7 @@ from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, load_config, save_config
+from pywhispr.filler import filler_words, is_deletion_only, remove_fillers
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.join import join_text
@@ -76,6 +77,7 @@ class PyWhisprApp(QObject):
         # Rebound wholesale (never mutated) when the editor saves, so the API's
         # request threads can read it without a lock.
         self._vocab: list[Rule] = load_vocabulary()
+        self._fillers = filler_words(cfg.extra_filler_words, cfg.keep_filler_words)
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self._context = ContextTracker(
             max_chars=cfg.context_chars, memory_seconds=cfg.context_memory_seconds
@@ -217,13 +219,13 @@ class PyWhisprApp(QObject):
 
         No continuation joining: that belongs to the local dictation cycle,
         which has a caret to join onto. A remote caller has neither that nor
-        any session. The vocabulary does apply, because it is a standing
-        preference about how words are spelled rather than session state.
+        any session. Filler removal and the vocabulary do apply, because they
+        are standing preferences about the text rather than session state.
         """
         text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
-        return self._corrected(text)
+        return self._corrected(self._cleaned(text))
 
     # -- state transitions (main thread only) --------------------------------
 
@@ -331,6 +333,9 @@ class PyWhisprApp(QObject):
             self._stop_recording()
 
     def _on_transcribed(self, text: str) -> None:
+        # Fillers first, and before the empty check: a recording of nothing but
+        # "um" leaves nothing to insert, which is exactly the empty case.
+        text = self._cleaned(text)
         if not text.strip():
             log.info("Empty transcription, nothing to insert")
             self._finish_cycle()
@@ -338,10 +343,34 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        # Vocabulary first: it can change the opening word, which is the word
+        # Vocabulary next: it can change the opening word, which is the word
         # the join then decides about.
         self._last_inserted = self._joined(self._corrected(text))
         self.injector.insert(self._last_inserted)
+
+    def _cleaned(self, text: str) -> str:
+        """Take the hesitations out of a finished transcript.
+
+        Wrapped like _corrected and _joined: the audio is gone, so a bug in here
+        must cost the user their "um"s at worst, never the dictation. The
+        tripwire is remove_fillers' own contract — deletions only — which also
+        catches a stray filler list eating half the sentence.
+        """
+        if not text or not self.cfg.remove_fillers or not self._fillers:
+            return text
+        try:
+            cleaned = remove_fillers(text, self._fillers)
+        except Exception:
+            log.exception("Filler removal failed; using the raw transcript")
+            return text
+        if not is_deletion_only(text, cleaned):
+            log.error(
+                "Filler removal added text (%d characters from %d); using the raw transcript",
+                len(cleaned),
+                len(text),
+            )
+            return text
+        return cleaned
 
     def _corrected(self, text: str) -> str:
         """Apply the user's vocabulary to a finished transcript.

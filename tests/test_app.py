@@ -271,6 +271,44 @@ class TestVocabulary:
         edit.assert_not_called()
 
 
+class TestFillerRemoval:
+    """"Um"s and "uh"s are gone before anything else sees the transcript."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_removes_fillers(self, app, qtbot):
+        insert = self._dictate(app, qtbot, "Um, so I, uh, think so.")
+        insert.assert_called_once_with("So I think so.")
+
+    def test_disabled_by_config(self, app, qtbot):
+        app.cfg.remove_fillers = False
+        insert = self._dictate(app, qtbot, "Um, so I, uh, think so.")
+        insert.assert_called_once_with("Um, so I, uh, think so.")
+
+    def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
+        with patch("pywhispr.app.remove_fillers", side_effect=RuntimeError("boom")):
+            insert = self._dictate(app, qtbot, "Um, so I think so.")
+        insert.assert_called_once_with("Um, so I think so.")
+        assert app.state == State.INSERTING
+
+    def test_output_that_is_not_a_deletion_is_rejected(self, app, qtbot):
+        with patch("pywhispr.app.remove_fillers", return_value="Something else entirely."):
+            insert = self._dictate(app, qtbot, "Um, so I think so.")
+        insert.assert_called_once_with("Um, so I think so.")
+
+    def test_the_api_gets_it_too(self, app):
+        app._test_backend.transcribe.return_value = "Um, hello from over there."
+        audio = np.zeros(16000, dtype=np.float32)
+        assert app._api_transcribe(audio) == "Hello from over there."
+
+
 class TestModelLoadFailure:
     """A failed load must leave a running, complaining app — not a vanished one."""
 
