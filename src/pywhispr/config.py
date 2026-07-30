@@ -40,9 +40,8 @@ class Config:
     lowercase_continuations: bool = True
     context_chars: int = 64
     context_memory_seconds: int = 90
-    # Filler removal: take "um"/"uh"-style hesitations out of the transcript.
-    # extra_filler_words adds terms of your own (a phrase like "you know" works);
-    # keep_filler_words switches off one of the built-ins.
+    # Filler removal: "um"/"uh"-style hesitations. extra_filler_words adds terms
+    # of your own; keep_filler_words spares a built-in.
     remove_fillers: bool = True
     extra_filler_words: list[str] = dataclasses.field(default_factory=list)
     keep_filler_words: list[str] = dataclasses.field(default_factory=list)

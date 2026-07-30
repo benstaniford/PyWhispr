@@ -333,8 +333,7 @@ class PyWhisprApp(QObject):
             self._stop_recording()
 
     def _on_transcribed(self, text: str) -> None:
-        # Fillers first, and before the empty check: a recording of nothing but
-        # "um" leaves nothing to insert, which is exactly the empty case.
+        # Before the empty check: a recording of nothing but "um" leaves nothing.
         text = self._cleaned(text)
         if not text.strip():
             log.info("Empty transcription, nothing to insert")
@@ -349,12 +348,10 @@ class PyWhisprApp(QObject):
         self.injector.insert(self._last_inserted)
 
     def _cleaned(self, text: str) -> str:
-        """Take the hesitations out of a finished transcript.
+        """Take the hesitations out, degrading to the raw transcript on any doubt.
 
-        Wrapped like _corrected and _joined: the audio is gone, so a bug in here
-        must cost the user their "um"s at worst, never the dictation. The
-        tripwire is remove_fillers' own contract — deletions only — which also
-        catches a stray filler list eating half the sentence.
+        Wrapped like _corrected and _joined: the audio is gone by now. The
+        tripwire is remove_fillers' own contract, deletions only.
         """
         if not text or not self.cfg.remove_fillers or not self._fillers:
             return text
