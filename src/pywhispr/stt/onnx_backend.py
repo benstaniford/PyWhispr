@@ -33,7 +33,7 @@ CPU_QUANTIZATION = "int8"
 # The variants are separate downloads, and picking wrong costs the user gigabytes:
 # full precision is 2.4 GB, int8 is 0.65 GB. Hence cuda_libraries_load(), which
 # decides *before* anything is fetched rather than after.
-DOWNLOAD_MB = {None: 2450, "int8": 700}
+DOWNLOAD_MB = {None: 2450, "int8": 650}
 
 # What the CUDA provider needs at load time. Loading them by name proves the
 # provider will work without downloading a model to find out.

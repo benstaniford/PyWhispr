@@ -498,6 +498,36 @@ class TestModelDownloadProgress:
             app._show_model_download()
         dialog.assert_called_once()
 
+    def test_the_size_shown_is_the_variant_about_to_be_fetched(self, app):
+        """The variant is chosen on the worker thread, so it must be forced early."""
+
+        class Backend:
+            quantization = None
+
+            def choose_quantization(self):
+                self.quantization = "int8"
+
+            @property
+            def download_mb(self):
+                return 650 if self.quantization else 2450
+
+        app.backend = Backend()
+        with (
+            patch("pywhispr.download.model_cached", return_value=False),
+            patch("pywhispr.ui.download_dialog.ModelDownloadDialog") as dialog,
+        ):
+            app._show_model_download()
+        assert dialog.call_args.args == (650,)
+
+    def test_a_backend_without_variants_still_shows_progress(self, app):
+        app.backend = MagicMock(spec=["download_mb", "name"], download_mb=2450)
+        with (
+            patch("pywhispr.download.model_cached", return_value=False),
+            patch("pywhispr.ui.download_dialog.ModelDownloadDialog") as dialog,
+        ):
+            app._show_model_download()
+        assert dialog.call_args.args == (2450,)
+
     def test_closed_when_the_model_is_ready(self, app):
         app._download_dialog = MagicMock()
         dialog = app._download_dialog

@@ -188,6 +188,16 @@ class PyWhisprApp(QObject):
             return
         from pywhispr.ui.download_dialog import ModelDownloadDialog
 
+        # download_mb depends on which variant will be fetched, and load() does
+        # not decide until it runs on the worker thread — so the size shown here
+        # would be the full-precision one whatever we were about to download.
+        choose = getattr(self.backend, "choose_quantization", None)
+        if choose is not None:
+            try:
+                choose()
+            except Exception:
+                log.debug("Could not pick the model variant early", exc_info=True)
+
         self._download_dialog = ModelDownloadDialog(self.backend.download_mb)
         self._download_dialog.show()
 
