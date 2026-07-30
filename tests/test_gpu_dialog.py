@@ -3,9 +3,10 @@ from unittest.mock import MagicMock, patch
 from pywhispr.ui import gpu_dialog
 
 
-def worker(monkeypatch, tmp_path, cache_mb=0):
-    """A worker whose byte counts come from a directory we control."""
+def worker(monkeypatch, tmp_path, cache_mb=0, cuda_installed=False):
+    """A worker whose byte counts come from values we control."""
     monkeypatch.setattr(gpu_dialog.cuda, "install_dir", lambda: tmp_path / "cuda")
+    monkeypatch.setattr(gpu_dialog.cuda, "is_installed", lambda: cuda_installed)
     monkeypatch.setattr(gpu_dialog, "cache_bytes", lambda: cache_mb * gpu_dialog.MEGABYTE)
     return gpu_dialog._Worker()
 
@@ -17,27 +18,51 @@ class TestOneBarForEverything:
             gpu_dialog.cuda.APPROXIMATE_DOWNLOAD_MB + gpu_dialog.APPROXIMATE_MODEL_MB
         )
 
-    def test_progress_counts_libraries_and_weights_together(self, monkeypatch, tmp_path):
+    def test_progress_counts_wheels_and_weights_together(self, monkeypatch, tmp_path):
+        w = worker(monkeypatch, tmp_path, cache_mb=7)
+        w._wheel_bytes = 3 * gpu_dialog.MEGABYTE
+        assert w._downloaded_mb() == 10
+
+    def test_wheel_bytes_come_from_the_download_not_the_installed_files(
+        self, monkeypatch, tmp_path
+    ):
+        """The extracted DLLs are half again bigger, so counting them overshot the total."""
         libraries = tmp_path / "cuda"
         libraries.mkdir()
-        (libraries / "cudart64_13.dll").write_bytes(b"\x00" * 3 * gpu_dialog.MEGABYTE)
+        (libraries / "cudart64_13.dll").write_bytes(b"\x00" * 40 * gpu_dialog.MEGABYTE)
 
-        w = worker(monkeypatch, tmp_path, cache_mb=7)
+        w = worker(monkeypatch, tmp_path)
+        w._on_wheel_bytes(10 * gpu_dialog.MEGABYTE)
         assert w._downloaded_mb() == 10
+
+    def test_the_total_drops_the_libraries_when_they_are_already_there(
+        self, monkeypatch, tmp_path
+    ):
+        w = worker(monkeypatch, tmp_path, cuda_installed=True)
+        assert w._total_mb == gpu_dialog.APPROXIMATE_MODEL_MB
 
     def test_weights_already_cached_are_not_counted_as_progress(self, monkeypatch, tmp_path):
         w = worker(monkeypatch, tmp_path, cache_mb=500)
         w._cache_at_start = 500 * gpu_dialog.MEGABYTE
         assert w._downloaded_mb() == 0
 
-    def test_the_bar_never_reaches_the_end_before_the_check_does(self, monkeypatch, tmp_path):
+    def test_overshooting_the_estimate_goes_busy_rather_than_pretending(
+        self, monkeypatch, tmp_path, qtbot
+    ):
+        """It read "3903 of about 3650 MB" at 99%, which is two lies for one bug."""
         w = worker(monkeypatch, tmp_path)
+        dialog = gpu_dialog.GpuSetupDialog()
+        qtbot.addWidget(dialog)
+
+        dialog._on_progress(*self._emitted(w, w._total_mb * 2))
+
+        assert dialog._bar.maximum() == 0  # indeterminate
+
+    def _emitted(self, w, downloaded_mb):
         seen = []
         w.progress.connect(lambda fraction, message: seen.append((fraction, message)))
-        w._emit(gpu_dialog.TOTAL_DOWNLOAD_MB * 2)
-        fraction, message = seen[-1]
-        assert fraction <= 0.99
-        assert str(gpu_dialog.TOTAL_DOWNLOAD_MB) in message
+        w._emit(downloaded_mb)
+        return seen[-1]
 
 
 class TestWhatItPromises:
@@ -74,6 +99,42 @@ class TestWhatItPromises:
         assert "Restart" in dialog._status.text()
 
 
+class TestOneWindowThroughout:
+    def test_it_becomes_the_model_download(self, qtbot, tmp_path, monkeypatch):
+        """Closing this and opening another put two bars for one download on screen."""
+        monkeypatch.setattr(gpu_dialog, "cache_bytes", lambda: 0)
+        dialog = gpu_dialog.GpuSetupDialog(first_run=True)
+        qtbot.addWidget(dialog)
+        dialog.track_model_download(expected_mb=100)
+
+        monkeypatch.setattr(gpu_dialog, "cache_bytes", lambda: 50 * gpu_dialog.MEGABYTE)
+        dialog._poll_model()
+
+        assert dialog._bar.value() == 500
+        assert "speech model" in dialog._status.text()
+
+    def test_finishing_stops_polling_and_closes(self, qtbot, monkeypatch):
+        monkeypatch.setattr(gpu_dialog, "cache_bytes", lambda: 0)
+        dialog = gpu_dialog.GpuSetupDialog()
+        qtbot.addWidget(dialog)
+        dialog.track_model_download(expected_mb=100)
+
+        dialog.finish()
+
+        assert not dialog._model_timer.isActive()
+
+    def test_a_failed_load_is_reported_here_rather_than_closing(self, qtbot, monkeypatch):
+        monkeypatch.setattr(gpu_dialog, "cache_bytes", lambda: 0)
+        dialog = gpu_dialog.GpuSetupDialog()
+        qtbot.addWidget(dialog)
+        dialog.track_model_download(expected_mb=100)
+
+        dialog.finish("The model could not be loaded.\n\nRuntimeError: offline")
+
+        assert "could not be loaded" in dialog._status.text()
+        assert not dialog._model_timer.isActive()
+
+
 class TestCancelling:
     def test_kills_the_check_instead_of_waiting_for_it(self, monkeypatch, tmp_path):
         """It used to wait out a multi-gigabyte download before giving up."""
@@ -102,7 +163,7 @@ class TestCancelling:
         w.finished.connect(lambda worked, detail: outcome.append((worked, detail)))
         monkeypatch.setattr(gpu_dialog.cuda, "is_installed", lambda: False)
 
-        def download(progress):
+        def download(progress, on_bytes=None):
             w.cancel()
             progress(0.5, "Downloading nvidia-cublas…")
 

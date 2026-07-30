@@ -593,6 +593,20 @@ class TestModelDownloadProgress:
             app._show_model_download()
         assert dialog.call_args.args == (2450,)
 
+    def test_the_gpu_window_carries_on_rather_than_a_second_one_opening(self, app):
+        """Its download leads straight into this one; two windows counted the same bytes."""
+        gpu_dialog = MagicMock()
+        gpu_dialog.isVisible.return_value = True
+        app._gpu_dialog = gpu_dialog
+        with (
+            patch("pywhispr.download.model_cached", return_value=False),
+            patch("pywhispr.ui.download_dialog.ModelDownloadDialog") as second,
+        ):
+            app._show_model_download()
+        second.assert_not_called()
+        gpu_dialog.track_model_download.assert_called_once()
+        assert app._download_dialog is gpu_dialog
+
     def test_closed_when_the_model_is_ready(self, app):
         app._download_dialog = MagicMock()
         dialog = app._download_dialog

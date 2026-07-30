@@ -251,7 +251,6 @@ class PyWhisprApp(QObject):
 
         if model_cached():
             return
-        from pywhispr.ui.download_dialog import ModelDownloadDialog
 
         # download_mb depends on which variant will be fetched, and load() does
         # not decide until it runs on the worker thread — so the size shown here
@@ -263,6 +262,16 @@ class PyWhisprApp(QObject):
             except Exception:
                 log.debug("Could not pick the model variant early", exc_info=True)
 
+        # The GPU setup window is still up when its download led here. It carries on
+        # as this one rather than being replaced: two windows counting the same bytes
+        # is what the user sees otherwise.
+        if self._gpu_dialog is not None and self._gpu_dialog.isVisible():
+            self._download_dialog = self._gpu_dialog
+            self._gpu_dialog = None
+            self._download_dialog.track_model_download(self.backend.download_mb)
+            return
+
+        from pywhispr.ui.download_dialog import ModelDownloadDialog
         from pywhispr.ui.foreground import show_in_front
 
         self._download_dialog = ModelDownloadDialog(self.backend.download_mb)

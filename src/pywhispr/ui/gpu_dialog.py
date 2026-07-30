@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import time
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -47,13 +47,6 @@ GPU_QUANTIZATION = ""
 STALL_SECONDS = 240.0
 
 
-def _directory_bytes(path) -> int:
-    try:
-        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-    except OSError:
-        return 0
-
-
 class _Worker(QObject):
     """Downloads the libraries and the weights, then proves the GPU is used."""
 
@@ -65,6 +58,12 @@ class _Worker(QObject):
         self._cancelled = False
         self._process = None
         self._cache_at_start = 0
+        self._wheel_bytes = 0
+        # Libraries already on disk are not part of what is about to be downloaded,
+        # so the total is what this run will actually fetch.
+        self._total_mb = APPROXIMATE_MODEL_MB
+        if not cuda.is_installed():
+            self._total_mb += cuda.APPROXIMATE_DOWNLOAD_MB
 
     def cancel(self) -> None:
         """Stop as soon as possible, including killing the check if it is running."""
@@ -77,7 +76,10 @@ class _Worker(QObject):
         try:
             self._cache_at_start = cache_bytes()
             if not cuda.is_installed():
-                cuda.download(lambda fraction, message: self._report_wheel(message))
+                cuda.download(
+                    lambda fraction, message: self._report_wheel(message),
+                    on_bytes=self._on_wheel_bytes,
+                )
             if self._cancelled:
                 self.finished.emit(False, "Cancelled.")
                 return
@@ -109,19 +111,26 @@ class _Worker(QObject):
         return cuda.finish_verification(self._process)
 
     def _downloaded_mb(self) -> int:
-        libraries = _directory_bytes(cuda.install_dir())
+        """What this run has fetched: wheels as they stream, weights as they land.
+
+        Wheel bytes come from the downloader rather than from the installed files,
+        which are half again bigger and only appear once each wheel is extracted.
+        """
         weights = max(0, cache_bytes() - self._cache_at_start)
-        return (libraries + weights) // MEGABYTE
+        return (self._wheel_bytes + weights) // MEGABYTE
+
+    def _on_wheel_bytes(self, total: int) -> None:
+        self._wheel_bytes = total
+        self._emit(self._downloaded_mb())
 
     def _emit(self, downloaded_mb: int) -> None:
         self.progress.emit(
-            min(0.99, downloaded_mb / TOTAL_DOWNLOAD_MB),
-            f"Downloading — {downloaded_mb} of about {TOTAL_DOWNLOAD_MB} MB.",
+            downloaded_mb / self._total_mb,  # may exceed 1: the dialog says so honestly
+            f"Downloading — {downloaded_mb} of about {self._total_mb} MB.",
         )
 
     def _report_wheel(self, message: str) -> bool:
-        """Called between wheels: the bar follows bytes, the text follows the step."""
-        self._emit(self._downloaded_mb())
+        """Called per wheel: the text follows the step, the bar follows the bytes."""
         log.debug("GPU setup: %s", message)
         return not self._cancelled
 
@@ -142,6 +151,9 @@ class GpuSetupDialog(QDialog):
         # On a first run the model loads straight after this, in this process:
         # nothing has built a session yet, so there is nothing to restart for.
         self._first_run = first_run
+        self._model_timer = None
+        self._model_expected_mb = APPROXIMATE_MODEL_MB
+        self._model_start_bytes = 0
 
         self._status = QLabel("Starting…")
         self._status.setWordWrap(True)
@@ -171,13 +183,21 @@ class GpuSetupDialog(QDialog):
         self._worker.cancel()
 
     def _on_progress(self, fraction: float, message: str) -> None:
-        self._bar.setValue(int(fraction * 1000))
+        if fraction >= 1.0:
+            self._bar.setRange(0, 0)  # past the estimate: busy, rather than a fake 99%
+        else:
+            self._bar.setRange(0, 1000)
+            self._bar.setValue(int(fraction * 1000))
         self._status.setText(message)
 
     def _on_finished(self, worked: bool, detail: str) -> None:
         self.worked = worked
+        # The verdict used to live only in this label, so a failure the user closed
+        # left no trace anywhere.
+        log.info("GPU setup finished: worked=%s (%s)", worked, detail)
         self._thread.quit()
         self._thread.wait(5000)
+        self._bar.setRange(0, 1000)
         self._bar.setValue(1000 if worked else self._bar.value())
         self._buttons.clear()
         self._buttons.addButton(QDialogButtonBox.StandardButton.Close)
@@ -206,6 +226,52 @@ class GpuSetupDialog(QDialog):
                 f"{on_the_cpu}. Details are in {log_path()}."
             )
         self.setup_finished.emit(worked)
+
+    # -- carrying on as the model download ----------------------------------
+    #
+    # One window from the offer to "ready". Closing this and opening another left
+    # two of them on screen counting the same bytes.
+
+    def track_model_download(self, expected_mb: int) -> None:
+        """Follow the model download in this window, after the setup has finished."""
+        self._model_expected_mb = expected_mb
+        self._model_start_bytes = cache_bytes()
+        self._buttons.clear()
+        hide = self._buttons.addButton("Hide", QDialogButtonBox.ButtonRole.RejectRole)
+        hide.clicked.connect(self.hide)
+        self._buttons.setEnabled(True)
+        self._model_timer = QTimer(self)
+        self._model_timer.setInterval(int(POLL_SECONDS * 1000))
+        self._model_timer.timeout.connect(self._poll_model)
+        self._model_timer.start()
+        self._poll_model()
+
+    def _poll_model(self) -> None:
+        downloaded = max(0, cache_bytes() - self._model_start_bytes) // MEGABYTE
+        if downloaded >= self._model_expected_mb:
+            self._bar.setRange(0, 0)
+            self._status.setText(f"Loading the speech model ({downloaded} MB so far)…")
+            return
+        self._bar.setRange(0, 1000)
+        self._bar.setValue(int(downloaded / self._model_expected_mb * 1000))
+        self._status.setText(
+            f"Downloading the speech model — {downloaded} of about "
+            f"{self._model_expected_mb} MB.\nDictation starts as soon as it is ready."
+        )
+
+    def finish(self, message: str | None = None) -> None:
+        """The model is ready, or it failed. Same contract as ModelDownloadDialog."""
+        if self._model_timer is not None:
+            self._model_timer.stop()
+        if message is None:
+            self.accept()
+            return
+        self._bar.setRange(0, 1000)
+        self._bar.setValue(0)
+        self._status.setText(message)
+        self._buttons.clear()
+        close = self._buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        close.clicked.connect(self.accept)
 
 
 def ask_to_enable(parent=None, first_run: bool = False) -> bool | None:

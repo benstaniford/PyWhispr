@@ -157,16 +157,23 @@ def _dll_members(archive: zipfile.ZipFile) -> Iterator[zipfile.ZipInfo]:
             yield member
 
 
-def download(progress: Progress | None = None) -> Path:
+def download(progress: Progress | None = None, on_bytes: Callable[[int], None] | None = None) -> Path:
     """Fetch every wheel and extract its libraries into :func:`install_dir`.
 
     Raises on any failure: a partial install is worse than none.
+
+    ``on_bytes`` receives the running total actually downloaded. A caller showing a
+    byte count wants this rather than the size of what has been extracted: the DLLs
+    are half again bigger than the wheels they came in, and they only appear at the
+    end of each wheel, which makes a bar of six jumps that overshoots its total.
     """
     import httpx
 
     def report(fraction: float, message: str) -> None:
         if progress is not None and not progress(fraction, message):
             raise KeyboardInterrupt("cancelled")
+
+    downloaded = 0  # across all wheels, so the caller sees one rising number
 
     target = install_dir()
     target.mkdir(parents=True, exist_ok=True)
@@ -188,6 +195,9 @@ def download(progress: Progress | None = None) -> Path:
                     for chunk in response.iter_bytes(1 << 20):
                         out.write(chunk)
                         done += len(chunk)
+                        downloaded += len(chunk)
+                        if on_bytes is not None:
+                            on_bytes(downloaded)
                         within = done / total if total else 0.0
                         report(
                             share + within / len(WHEELS),
