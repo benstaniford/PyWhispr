@@ -75,6 +75,9 @@ this. (On Windows, double-tap works without any special permission.)
 | `lowercase_continuations` | `true` | Also lower-case the new text's first word when the sentence in front of the caret is unfinished |
 | `context_chars` | `64` | How many characters before the caret are read to decide the join |
 | `context_memory_seconds` | `90` | When the caret can't be read, how long PyWhispr trusts its memory of its own last insertion |
+| `remove_fillers` | `true` | Drop *um*, *uh*, *erm* and friends from the transcript — see [Filler removal](#filler-removal) |
+| `extra_filler_words` | `[]` | More terms to drop, e.g. `["you know", "hmm", "like"]` (a phrase only matches those words next to each other) |
+| `keep_filler_words` | `[]` | Built-in fillers to leave alone, e.g. `["er", "well"]` |
 | `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via tray menu → **Vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `api_enabled` | `true` | Serve the [network API](#network-api) |
@@ -115,19 +118,69 @@ is **never written to the log** — only its length. Set `join_continuations = f
 to turn the whole thing off, or `lowercase_continuations = false` to keep the
 spacing fix without the capitalisation change.
 
+## Filler removal
+
+Speech models are faithful: say *"Um, so I, uh, think so."* and that is exactly
+what gets typed. PyWhispr takes the hesitations out, along with the spacing and
+punctuation they leave behind:
+
+| You said | You get |
+|---|---|
+| *Um, so I think so.* | *So I think so.* |
+| *I think, uh, we should go.* | *I think we should go.* |
+| *I think so, um.* | *I think so.* |
+| *Hello. Um. Right then.* | *Hello. Right then.* |
+| *Um.* | nothing at all |
+
+The capital moves onto the word that now starts the sentence, a comma pair that
+was only holding the filler apart goes with it, a bracket or dash pair is tidied,
+and a run of them (*um, uh,*) is removed in one piece. A comma the sentence needs
+stays: *"We need milk, um, eggs."* → *"We need milk, eggs."*, and *"If you do, um,
+tell me."* keeps the comma that stops it reading as *"if you do tell me"*.
+
+Only a **closed list of hesitation sounds** is removed: *um*, *umm*, *uhm*, *uh*,
+*uhh*, *erm*, *er*, *ahem* and their longer spellings. Words that merely look like
+filler are left alone, because a wrongly deleted word costs a re-dictation while a
+surviving *um* costs a keystroke: *uh-huh* and *uh huh* mean yes, *uh oh* means
+trouble, *err on the side of caution* is a verb, and *ER* and *ERM* are an acronym.
+Add terms you never mean with `extra_filler_words = ["you know", "hmm"]`, spare a
+built-in with `keep_filler_words`, or set `remove_fillers = false`. These are read
+at startup, so restart PyWhispr after changing them.
+
+**What this does not do.** Conversational filler — *you know*, *I mean*,
+*basically*, *sort of* — is left alone unless you list it yourself. Removing it
+reliably needs to understand the sentence: *"you know that I left"* must keep its
+words while *"it's, you know, complicated"* should lose them, and no word list
+draws that line. (Wispr Flow does this with a fine-tuned LLM cleanup pass in the
+cloud; PyWhispr is local and has no such pass.) Note also that recent Parakeet
+models drop most hesitations by themselves, so on a good recording this pass
+often has nothing to do.
 ## Speed
 
-Transcription runs on the **CPU unless a full CUDA 13 runtime and cuDNN 9 are
-installed** — `onnxruntime-gpu` advertises `CUDAExecutionProvider` whether or not
-the libraries are there, and quietly falls back. `pywhispr diagnose` prints which
-providers actually loaded, and PyWhispr adds the pip CUDA wheels'
-(`nvidia-cublas`, `nvidia-cudnn-cu13`, …) DLL directories to the search path,
-since nothing else does.
+Transcription runs on the CPU unless a CUDA 13 runtime and cuDNN 9 are present.
+`onnxruntime-gpu` advertises `CUDAExecutionProvider` whether or not the libraries
+are installed and then quietly drops it, so the honest answer comes from
+`pywhispr diagnose`, which prints the providers the sessions actually loaded.
 
-On the CPU path, `model_quantization = "int8"` is the lever that matters: roughly
-**1.5–2× faster** for a small accuracy cost, on the same audio and the same
-wording in testing (3 s of speech: 716 ms → 445 ms). The quantised weights are a
-separate download, fetched on first use.
+Two things make the CPU path fast, both on by default:
+
+- **A thread cap.** onnxruntime uses one thread per core; that is far slower here,
+  because Parakeet TDT decodes autoregressively and thread synchronisation
+  dominates thousands of small ops. On 15s of speech: 16 threads 1.96s, 8 threads
+  0.81s, **4 threads 0.43s**. `stt_threads` overrides it, `0` restores
+  onnxruntime's default.
+- **Quantisation, when it helps.** `model_quantization` unset means int8 on the
+  CPU (~2x faster, small accuracy cost) and full precision on the GPU, where int8
+  is ~4x *slower* — the quantised ops have no CUDA kernels. Set it explicitly to
+  override. The quantised weights are a separate download.
+
+With a working CUDA runtime the same clip takes **0.12s**. That needs ~1.2GB of
+libraries, including a cuFFT build that is only on NVIDIA's own index; PyWhispr
+puts the pip CUDA wheels' DLL directories on the search path itself, since nothing
+else does.
+
+macOS uses the MLX backend, where none of this applies.
+
 
 ## Custom vocabulary
 
