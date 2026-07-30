@@ -66,6 +66,7 @@ this. (On Windows, double-tap works without any special permission.)
 | `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
+| `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
@@ -154,6 +155,32 @@ draws that line. (Wispr Flow does this with a fine-tuned LLM cleanup pass in the
 cloud; PyWhispr is local and has no such pass.) Note also that recent Parakeet
 models drop most hesitations by themselves, so on a good recording this pass
 often has nothing to do.
+## Speed
+
+Transcription runs on the CPU unless a CUDA 13 runtime and cuDNN 9 are present.
+`onnxruntime-gpu` advertises `CUDAExecutionProvider` whether or not the libraries
+are installed and then quietly drops it, so the honest answer comes from
+`pywhispr diagnose`, which prints the providers the sessions actually loaded.
+
+Two things make the CPU path fast, both on by default:
+
+- **A thread cap.** onnxruntime uses one thread per core; that is far slower here,
+  because Parakeet TDT decodes autoregressively and thread synchronisation
+  dominates thousands of small ops. On 15s of speech: 16 threads 1.96s, 8 threads
+  0.81s, **4 threads 0.43s**. `stt_threads` overrides it, `0` restores
+  onnxruntime's default.
+- **Quantisation, when it helps.** `model_quantization` unset means int8 on the
+  CPU (~2x faster, small accuracy cost) and full precision on the GPU, where int8
+  is ~4x *slower* — the quantised ops have no CUDA kernels. Set it explicitly to
+  override. The quantised weights are a separate download.
+
+With a working CUDA runtime the same clip takes **0.12s**. That needs ~1.2GB of
+libraries, including a cuFFT build that is only on NVIDIA's own index; PyWhispr
+puts the pip CUDA wheels' DLL directories on the search path itself, since nothing
+else does.
+
+macOS uses the MLX backend, where none of this applies.
+
 
 ## Custom vocabulary
 

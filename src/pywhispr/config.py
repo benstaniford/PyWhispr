@@ -29,6 +29,14 @@ class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
     input_device: int | None = None  # None = system default microphone
     model_override: str | None = None  # HuggingFace repo id; None = platform default
+    # ONNX (Windows/Linux) only. None (the default) chooses: "int8" when the model
+    # ends up on the CPU, where it is ~2x faster, and full precision on the GPU,
+    # where int8 is *slower*. Set it explicitly ("int8" / "") to override.
+    model_quantization: str | None = None
+    # How many CPU threads a transcription may use. Fewer is faster here than
+    # onnxruntime's default of one per core — see stt/onnx_backend.py. None uses
+    # PyWhispr's tuned default; 0 restores onnxruntime's.
+    stt_threads: int | None = None
     max_recording_seconds: int = 120
     play_sounds: bool = True
     paste_delay_ms: int = 150
