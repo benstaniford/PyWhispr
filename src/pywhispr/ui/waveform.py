@@ -39,12 +39,11 @@ class WaveformWidget(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._profile = [_profile(i) for i in range(BAR_COUNT)]
-        # Irrational-ish speeds and offsets keep the bars from moving in lockstep.
+        # Uneven speeds and offsets keep the bars from moving in lockstep.
         self._speeds = [3.1 + 1.7 * ((i * 0.618) % 1.0) for i in range(BAR_COUNT)]
         self._phases = [(i * 2.399) % (2 * math.pi) for i in range(BAR_COUNT)]
         self._heights = [IDLE_FRACTION] * BAR_COUNT
-        self._level = 0.0
-        self._target_level = 0.0
+        self._level = self._target_level = 0.0
         self._clock = 0.0
         self._timer = QTimer(self)
         self._timer.setInterval(FRAME_MS)

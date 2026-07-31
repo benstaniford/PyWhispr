@@ -5,7 +5,7 @@ Run ``python -m pywhispr.ui.overlay`` for a standalone demo with fake levels.
 
 from __future__ import annotations
 
-import logging
+import ctypes
 import sys
 
 from PySide6.QtCore import Qt, QTimer, Slot
@@ -13,8 +13,6 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
 
 from pywhispr.ui.waveform import WaveformWidget
-
-log = logging.getLogger(__name__)
 
 PILL_WIDTH = 280
 PILL_HEIGHT = 64
@@ -60,28 +58,14 @@ class OverlayWindow(QWidget):
         self._topmost_timer.timeout.connect(self._raise_to_top)
 
     def _raise_to_top(self) -> None:
-        """Put the pill back on top *without* activating it (focus must not move)."""
         if not self.isVisible():
             return
         if sys.platform == "win32":
-            try:
-                import ctypes
-
-                HWND_TOPMOST = -1
-                SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
-                ctypes.windll.user32.SetWindowPos(
-                    int(self.winId()),
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
-                )
-                return
-            except Exception:  # pragma: no cover - never break recording over chrome
-                log.debug("SetWindowPos failed; falling back to raise_()", exc_info=True)
-        self.raise_()
+            # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: reclaim the
+            # topmost band without moving focus. raise_() only reorders within it.
+            ctypes.windll.user32.SetWindowPos(int(self.winId()), -1, 0, 0, 0, 0, 0x13)
+        else:
+            self.raise_()
 
     def _show_on_top(self) -> None:
         self.show()
