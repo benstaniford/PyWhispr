@@ -5,16 +5,22 @@ Run ``python -m pywhispr.ui.overlay`` for a standalone demo with fake levels.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Slot
+import logging
+import sys
+
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
 
 from pywhispr.ui.waveform import WaveformWidget
 
+log = logging.getLogger(__name__)
+
 PILL_WIDTH = 280
 PILL_HEIGHT = 64
 BOTTOM_MARGIN = 48
 BACKGROUND = QColor(20, 20, 24, 235)
+TOPMOST_INTERVAL_MS = 1000  # re-assert while visible; other apps steal the top slot
 
 
 class OverlayWindow(QWidget):
@@ -46,6 +52,42 @@ class OverlayWindow(QWidget):
         layout.addWidget(self.status_label)
         self.status_label.hide()
 
+        # WindowStaysOnTopHint only wins the ordering at show time: anything that
+        # later goes topmost itself (Teams calls, video players, other overlays)
+        # ends up above us. Nudge ourselves back while we're on screen.
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setInterval(TOPMOST_INTERVAL_MS)
+        self._topmost_timer.timeout.connect(self._raise_to_top)
+
+    def _raise_to_top(self) -> None:
+        """Put the pill back on top *without* activating it (focus must not move)."""
+        if not self.isVisible():
+            return
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                HWND_TOPMOST = -1
+                SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+                ctypes.windll.user32.SetWindowPos(
+                    int(self.winId()),
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                )
+                return
+            except Exception:  # pragma: no cover - never break recording over chrome
+                log.debug("SetWindowPos failed; falling back to raise_()", exc_info=True)
+        self.raise_()
+
+    def _show_on_top(self) -> None:
+        self.show()
+        self._raise_to_top()
+        self._topmost_timer.start()
+
     def _move_to_bottom_center(self) -> None:
         screen = QApplication.primaryScreen()
         geo = screen.availableGeometry()
@@ -66,7 +108,7 @@ class OverlayWindow(QWidget):
         self.waveform.show()
         self.waveform.start()
         self._move_to_bottom_center()
-        self.show()
+        self._show_on_top()
 
     def show_status(self, text: str) -> None:
         """Swap the waveform for a short status message (e.g. 'Transcribing…')."""
@@ -75,10 +117,11 @@ class OverlayWindow(QWidget):
         self.status_label.setText(text)
         self.status_label.show()
         self._move_to_bottom_center()
-        self.show()
+        self._show_on_top()
 
     def hide_overlay(self) -> None:
         self.waveform.stop()
+        self._topmost_timer.stop()
         self.hide()
 
     @Slot(float)
