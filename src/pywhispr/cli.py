@@ -78,23 +78,14 @@ def main(argv: list[str] | None = None) -> int:
 
     use_system_certificates()
 
-    # Before anything imports huggingface_hub: it reads its cache path at import
-    # time, so a later override would be ignored. Every subcommand wants it — the
-    # download, the GPU check and the app all have to agree on where the model is.
-    from pywhispr.config import load_config
-    from pywhispr.storage import apply_overrides
-
-    config = load_config()
-    apply_overrides(config)
-
     command = args.command or "run"
 
-    # Before any onnxruntime import, and skipped for the commands that install or
-    # remove it: activating the copy being deleted only confuses the failure.
-    if command not in ("enable-directml", "disable-directml"):
-        from pywhispr.directml import activate_if_enabled
+    # Storage overrides and the DirectML swap, both of which have to happen before
+    # anything imports huggingface_hub or onnxruntime. Shared with the frozen app's
+    # own entry point, which does not come through here — see pywhispr.startup.
+    from pywhispr.startup import prepare
 
-        activate_if_enabled(config)
+    prepare(command)
     if log_file is not None:
         log.debug("Logging to %s", log_file)
 

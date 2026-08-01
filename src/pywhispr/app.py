@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
-from pywhispr.config import Config, load_config, save_config
+from pywhispr.config import Config, save_config
 from pywhispr.filler import filler_words, is_deletion_only, remove_fillers
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
@@ -787,7 +787,13 @@ def run_app() -> int:
     from PySide6.QtGui import QIcon
 
     from pywhispr.logging_setup import install_qt_message_handler
+    from pywhispr.startup import prepare
     from pywhispr.tray import app_pixmap
+
+    # Here rather than only in cli.main: the frozen executable with no arguments
+    # comes straight here, so this is the one place every path to the app passes
+    # through. Idempotent, so arriving via cli.main is not a problem.
+    config = prepare("run")
 
     install_qt_message_handler()  # before QApplication, to catch platform-plugin gripes
     app = QApplication(sys.argv)
@@ -795,6 +801,6 @@ def run_app() -> int:
     app.setWindowIcon(QIcon(app_pixmap()))
     app.setQuitOnLastWindowClosed(False)  # tray app: no windows most of the time
 
-    whispr = PyWhisprApp(load_config())
+    whispr = PyWhisprApp(config)
     whispr.start()
     return app.exec()
