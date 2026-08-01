@@ -73,6 +73,14 @@ def main(argv: list[str] | None = None) -> int:
 
     use_system_certificates()
 
+    # Before anything imports huggingface_hub: it reads its cache path at import
+    # time, so a later override would be ignored. Every subcommand wants it — the
+    # download, the GPU check and the app all have to agree on where the model is.
+    from pywhispr.config import load_config
+    from pywhispr.storage import apply_overrides
+
+    apply_overrides(load_config())
+
     command = args.command or "run"
     if log_file is not None:
         log.debug("Logging to %s", log_file)

@@ -40,6 +40,11 @@ class Config:
     # Offer the one-time CUDA download when there is an NVIDIA GPU going unused.
     # Set false (or answer "Never") to stop asking; the tray menu still has it.
     offer_gpu_setup: bool = True
+    # Where the gigabytes go. None keeps the platform defaults (the Hugging Face
+    # cache and the app's data directory, both on the system drive); set either to
+    # a path on another drive when C: has no room. See storage.py.
+    model_cache_dir: str | None = None
+    cuda_dir: str | None = None
     max_recording_seconds: int = 120
     play_sounds: bool = True
     paste_delay_ms: int = 150

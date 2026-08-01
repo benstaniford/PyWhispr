@@ -25,10 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
-from platformdirs import user_data_dir
-
-from pywhispr.config import APP_NAME
-
 log = logging.getLogger(__name__)
 
 PYPI = "https://pypi.org/simple"
@@ -73,7 +69,29 @@ MINIMUM_DRIVER = 580
 
 
 def install_dir() -> Path:
-    return Path(user_data_dir(APP_NAME)) / "cuda"
+    """Where the libraries live — overridable, since they are 1.2 GB extracted.
+
+    Imported here rather than at module scope: storage imports config, and cuda is
+    imported from config's own callers.
+    """
+    from pywhispr.storage import cuda_dir
+
+    return cuda_dir(_config_or_none())
+
+
+def _config_or_none():
+    """The saved config, or None if it cannot be read.
+
+    A broken config file must not stop `enable-gpu`: the answer without it is the
+    default directory, which is what every install had before this was settable.
+    """
+    try:
+        from pywhispr.config import load_config
+
+        return load_config()
+    except Exception:
+        log.debug("Could not read the config for the CUDA directory", exc_info=True)
+        return None
 
 
 def nvidia_driver_version() -> float | None:
