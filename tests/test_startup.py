@@ -18,10 +18,17 @@ from pywhispr.storage import CUDA_ENV, MODEL_ENV
 
 @pytest.fixture(autouse=True)
 def fresh(monkeypatch):
+    """Hermetic: apply_overrides writes os.environ directly, which monkeypatch
+    cannot undo, and activate_if_enabled would otherwise read the developer's own
+    config and DirectML install."""
     startup.reset_for_tests()
+    saved = dict(os.environ)
     for name in (MODEL_ENV, CUDA_ENV, "HF_HUB_CACHE", "HF_HOME"):
-        monkeypatch.delenv(name, raising=False)
+        os.environ.pop(name, None)
+    monkeypatch.setattr("pywhispr.directml.activate_if_enabled", lambda _cfg: False)
     yield
+    os.environ.clear()
+    os.environ.update(saved)
     startup.reset_for_tests()
 
 
@@ -130,3 +137,50 @@ class _FakeQt:
 
     def exec(self):
         return 0
+
+
+class TestDownloadVisibility:
+    """Switching variants downloaded gigabytes behind a motionless "Loading model…".
+
+    The cached check was a flat 400 MB against the whole cache, so 785 MB of int8
+    counted as "cached" while a 2.4 GB full-precision fetch ran unseen — and one of
+    those died after 202 seconds with nothing on screen to say so.
+    """
+
+    def _windows_shown(self, monkeypatch, cache_mb, expected_mb):
+        import pywhispr.app as app_module
+
+        shown = []
+
+        class FakeBackend:
+            download_mb = expected_mb
+
+            def choose_quantization(self):
+                pass
+
+        class FakeWindow:
+            def track_model_download(self, _mb):
+                shown.append("window")
+
+        class FakeApp:
+            backend = FakeBackend()
+
+            def _setup_window(self):
+                return FakeWindow()
+
+        monkeypatch.setattr("pywhispr.download.cache_bytes", lambda: cache_mb * 1024 * 1024)
+        app_module.PyWhisprApp._show_model_download(FakeApp())
+        return shown
+
+    def test_a_bigger_variant_still_shows_progress(self, monkeypatch):
+        """785 MB of int8 on disk, 2.4 GB of full precision about to be fetched."""
+        assert self._windows_shown(monkeypatch, cache_mb=785, expected_mb=2450) == ["window"]
+
+    def test_an_already_downloaded_variant_shows_nothing(self, monkeypatch):
+        assert self._windows_shown(monkeypatch, cache_mb=3200, expected_mb=2450) == []
+
+    def test_a_first_run_shows_progress(self, monkeypatch):
+        assert self._windows_shown(monkeypatch, cache_mb=0, expected_mb=650) == ["window"]
+
+    def test_a_part_downloaded_variant_still_shows_progress(self, monkeypatch):
+        assert self._windows_shown(monkeypatch, cache_mb=300, expected_mb=650) == ["window"]

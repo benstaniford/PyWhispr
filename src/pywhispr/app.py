@@ -342,18 +342,29 @@ class PyWhisprApp(QObject):
         """On a first run, show the download rather than a silent "Loading…"."""
         from pywhispr.download import model_cached
 
-        if model_cached():
-            return
-
-        # download_mb depends on which variant will be fetched, and load() does
-        # not decide until it runs on the worker thread — so the size shown here
-        # would be the full-precision one whatever we were about to download.
+        # Before the cached check, not after: download_mb depends on which variant
+        # will be fetched, and load() does not decide until it runs on the worker
+        # thread — so the size shown here would be the full-precision one whatever
+        # we were about to download.
         choose = getattr(self.backend, "choose_quantization", None)
         if choose is not None:
             try:
                 choose()
             except Exception:
                 log.debug("Could not pick the model variant early", exc_info=True)
+
+        # Against the size of *this* variant. A flat 400 MB meant that switching
+        # from int8 to full precision — enabling a GPU does exactly that — saw
+        # 785 MB in the cache, called it cached, and fetched 2.4 GB behind a
+        # motionless "Loading model…". One such fetch died after 202 seconds with
+        # nothing on screen to say so.
+        expected_mb = getattr(self.backend, "download_mb", None)
+        # A backend is duck-typed here, so the size is only trusted when it really
+        # is one; anything else falls back to the old flat threshold rather than
+        # throwing from the middle of startup.
+        minimum_mb = int(expected_mb * 0.8) if isinstance(expected_mb, (int, float)) else 400
+        if model_cached(minimum_mb=minimum_mb):
+            return
 
         self._setup_window().track_model_download(self.backend.download_mb)
 
