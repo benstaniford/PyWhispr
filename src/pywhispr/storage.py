@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 MODEL_ENV = "PYWHISPR_MODEL_DIR"
 CUDA_ENV = "PYWHISPR_CUDA_DIR"
+DIRECTML_ENV = "PYWHISPR_DIRECTML_DIR"
 
 # The model cache and the CUDA libraries, plus room to extract the wheels.
 REQUIRED_MB = 7000
@@ -47,6 +48,10 @@ def default_cuda_dir() -> Path:
     return Path(user_data_dir(APP_NAME)) / "cuda"
 
 
+def default_directml_dir() -> Path:
+    return Path(user_data_dir(APP_NAME)) / "directml"
+
+
 def model_dir(cfg: Config | None = None) -> Path:
     override = os.environ.get(MODEL_ENV) or (cfg.model_cache_dir if cfg else None)
     return Path(override).expanduser() if override else default_model_dir()
@@ -55,6 +60,11 @@ def model_dir(cfg: Config | None = None) -> Path:
 def cuda_dir(cfg: Config | None = None) -> Path:
     override = os.environ.get(CUDA_ENV) or (cfg.cuda_dir if cfg else None)
     return Path(override).expanduser() if override else default_cuda_dir()
+
+
+def directml_dir(cfg: Config | None = None) -> Path:
+    override = os.environ.get(DIRECTML_ENV) or (cfg.directml_dir if cfg else None)
+    return Path(override).expanduser() if override else default_directml_dir()
 
 
 def apply_overrides(cfg: Config) -> None:
@@ -68,6 +78,8 @@ def apply_overrides(cfg: Config) -> None:
         os.environ[MODEL_ENV] = cfg.model_cache_dir
     if cfg.cuda_dir and CUDA_ENV not in os.environ:
         os.environ[CUDA_ENV] = cfg.cuda_dir
+    if cfg.directml_dir and DIRECTML_ENV not in os.environ:
+        os.environ[DIRECTML_ENV] = cfg.directml_dir
 
     model = os.environ.get(MODEL_ENV)
     if model:
@@ -105,3 +117,4 @@ def set_base_dir(cfg: Config, base: Path) -> None:
     base = Path(base).expanduser()
     cfg.model_cache_dir = str(base / "models")
     cfg.cuda_dir = str(base / "cuda")
+    cfg.directml_dir = str(base / "directml")

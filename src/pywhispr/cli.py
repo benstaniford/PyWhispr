@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("enable-gpu", help="download the CUDA libraries for NVIDIA GPU acceleration")
     sub.add_parser("disable-gpu", help="remove the downloaded CUDA libraries")
+    sub.add_parser(
+        "enable-directml",
+        help="GPU acceleration for cards CUDA cannot use (pre-Turing NVIDIA, AMD, Intel)",
+    )
+    sub.add_parser("disable-directml", help="remove the DirectML build of onnxruntime")
     p_verify = sub.add_parser(
         "verify-gpu", help="report whether transcription really runs on the GPU"
     )
@@ -79,9 +84,17 @@ def main(argv: list[str] | None = None) -> int:
     from pywhispr.config import load_config
     from pywhispr.storage import apply_overrides
 
-    apply_overrides(load_config())
+    config = load_config()
+    apply_overrides(config)
 
     command = args.command or "run"
+
+    # Before any onnxruntime import, and skipped for the commands that install or
+    # remove it: activating the copy being deleted only confuses the failure.
+    if command not in ("enable-directml", "disable-directml"):
+        from pywhispr.directml import activate_if_enabled
+
+        activate_if_enabled(config)
     if log_file is not None:
         log.debug("Logging to %s", log_file)
 
@@ -110,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "disable-gpu":
         return _cmd_disable_gpu()
+
+    if command == "enable-directml":
+        return _cmd_enable_directml()
+
+    if command == "disable-directml":
+        return _cmd_disable_directml()
 
     if command == "verify-gpu":
         return _cmd_verify_gpu(args.quantization)
@@ -212,6 +231,64 @@ def _cmd_disable_gpu() -> int:
     from pywhispr import cuda
 
     print("Removed the CUDA libraries." if cuda.remove() else "Nothing to remove.")
+    return 0
+
+
+def _cmd_enable_directml() -> int:
+    """Fetch the DirectML onnxruntime, then check it in a fresh process.
+
+    A fresh one because this process has already resolved its providers — the same
+    reason `enable-gpu` verifies in a subprocess.
+    """
+    from pywhispr import cuda, directml
+    from pywhispr.config import load_config, save_config
+
+    offer, why_not = directml.can_offer()
+    if not offer and not directml.is_installed():
+        print(f"Not available: {why_not}")
+        return 1
+
+    if not directml.is_installed():
+        print(f"Downloading {directml.PACKAGE} (~{directml.APPROXIMATE_DOWNLOAD_MB} MB)...")
+
+        def progress(fraction: float, message: str) -> bool:
+            print(f"{fraction * 100:5.1f}%  {message}")
+            return True
+
+        try:
+            directml.download(progress)
+        except KeyboardInterrupt:
+            print("Cancelled.")
+            return 1
+        except Exception as exc:
+            log.exception("DirectML download failed")
+            print(f"Failed: {type(exc).__name__}: {exc}")
+            return 1
+
+    config = load_config()
+    if config.use_directml is False:
+        config.use_directml = True
+        save_config(config)
+
+    print("Checking that transcription really runs on the GPU...")
+    works, detail = cuda.verify()  # the same verify-gpu subprocess: it reports any provider
+    print(f"{'Ready' if works else 'Not working'}: {detail}")
+    if works:
+        print("Restart PyWhispr to start using it.")
+    return 0 if works else 1
+
+
+def _cmd_disable_directml() -> int:
+    from pywhispr import directml
+    from pywhispr.config import load_config, save_config
+
+    installed = directml.is_installed()
+    directml.remove()
+    config = load_config()
+    if config.use_directml:
+        config.use_directml = None
+        save_config(config)
+    print("Removed the DirectML onnxruntime." if installed else "Nothing to remove.")
     return 0
 
 

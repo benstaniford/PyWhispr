@@ -90,7 +90,7 @@ class TestOnnxProviderFallback:
         backend = self._backend()  # fixture's model runs on the CPU
         with caplog.at_level("WARNING"):
             backend.load()
-        assert "CUDA was requested" in caplog.text
+        assert "CUDAExecutionProvider was requested" in caplog.text
 
     def test_falls_back_to_cpu_when_cuda_session_fails(self, modules):
         onnx_asr, _ = modules

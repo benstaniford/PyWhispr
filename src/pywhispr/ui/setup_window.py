@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from pywhispr import cuda
+from pywhispr import cuda, directml
 from pywhispr.download import APPROXIMATE_MODEL_MB, cache_bytes, start_model_download
 from pywhispr.ui.foreground import show_in_front
 
@@ -60,16 +60,21 @@ class _Worker(QObject):
     checking = Signal()  # downloading is done; the bar has nothing left to show
     finished = Signal(bool, str)  # worked, detail
 
-    def __init__(self) -> None:
+    def __init__(self, kind: str = "cuda") -> None:
         super().__init__()
+        # "cuda" or "directml": the same three steps either way, differing only in
+        # what gets fetched first. The check afterwards is shared — verify-gpu
+        # reports whichever provider the sessions ended up on.
+        self._kind = kind
+        self._backend = directml if kind == "directml" else cuda
         self._cancelled = False
         self._process = None
         self._wheel_bytes = 0
         self._cache_at_start = 0
         self._total_mb = APPROXIMATE_MODEL_MB
-        if not cuda.is_installed():
+        if not self._backend.is_installed():
             # Libraries already on disk are not part of what is about to be fetched.
-            self._total_mb += cuda.APPROXIMATE_DOWNLOAD_MB
+            self._total_mb += self._backend.APPROXIMATE_DOWNLOAD_MB
 
     def cancel(self) -> None:
         """Stop as soon as possible, including killing whatever step is running."""
@@ -81,8 +86,8 @@ class _Worker(QObject):
     def run(self) -> None:
         try:
             self._cache_at_start = cache_bytes()
-            if not cuda.is_installed():
-                cuda.download(
+            if not self._backend.is_installed():
+                self._backend.download(
                     lambda fraction, message: self._step(message),
                     on_bytes=self._on_wheel_bytes,
                 )
@@ -90,17 +95,19 @@ class _Worker(QObject):
                 self.finished.emit(False, "Cancelled.")
                 return
 
-            # Full precision: the only variant the GPU will ever run, so it has to
-            # come down either way and int8 would prove the wrong thing. Downloaded
-            # as its own step so the bar covers it, rather than inside the check.
+            # Full precision for CUDA: the only variant it will ever run, so it has
+            # to come down either way and int8 would prove the wrong thing. DirectML
+            # is left on whatever is configured — whether it gains from int8 is not
+            # something we have measured, and a needless 2.4 GB is a real cost.
             self.step.emit("Starting the speech model download…")
-            ok, detail = self._await(start_model_download(GPU_QUANTIZATION))
+            quantization = None if self._kind == "directml" else GPU_QUANTIZATION
+            ok, detail = self._await(start_model_download(quantization))
             if not ok:
                 self.finished.emit(False, detail)
                 return
 
             self.checking.emit()
-            worked, detail = self._await(cuda.start_verification(GPU_QUANTIZATION))
+            worked, detail = self._await(cuda.start_verification(quantization))
         except KeyboardInterrupt:
             self.finished.emit(False, "Cancelled.")
         except Exception as exc:
@@ -232,7 +239,7 @@ class SetupWindow(QDialog):
 
     # -- GPU acceleration ----------------------------------------------------
 
-    def start_gpu_setup(self, first_run: bool = False) -> None:
+    def start_gpu_setup(self, first_run: bool = False, kind: str = "cuda") -> None:
         self._first_run = first_run
         self._gpu_line.setText("GPU acceleration — starting…")
         self._gpu_line.show()
@@ -245,7 +252,7 @@ class SetupWindow(QDialog):
         self._quiet_timer.timeout.connect(self._watch_for_quiet)
         self._quiet_timer.start()
 
-        self._worker = _Worker()
+        self._worker = _Worker(kind)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -355,17 +362,29 @@ class SetupWindow(QDialog):
         close.clicked.connect(self.accept)
 
 
-def ask_to_enable(parent=None, first_run: bool = False) -> bool | None:
+def ask_to_enable(parent=None, first_run: bool = False, kind: str = "cuda") -> bool | None:
     """Offer GPU acceleration. True = yes, False = not now, None = never ask again.
 
     ``first_run`` because the two cases promise different things: on a first run
     there is no model yet, so dictation starts when the download finishes rather
     than carrying on through it.
+
+    ``kind`` is "cuda" or "directml". DirectML is offered only where CUDA cannot go,
+    and it is promised less: it runs on any DirectX 12 GPU, including the pre-Turing
+    NVIDIA cards CUDA 13 dropped and every AMD or Intel one, but how much it gains
+    over the CPU on this model is not something we have measured.
     """
+    directml_offer = kind == "directml"
     box = QMessageBox(parent)
     box.setWindowTitle("PyWhispr — GPU acceleration available")
     box.setIcon(QMessageBox.Icon.Question)
-    box.setText("GPU acceleration is available — it makes transcription near instant.")
+    if directml_offer:
+        box.setText(
+            "This GPU cannot use CUDA, but it can use DirectML — which may still be "
+            "faster than the CPU."
+        )
+    else:
+        box.setText("GPU acceleration is available — it makes transcription near instant.")
     if first_run:
         # Either answer downloads something — the GPU and CPU models are separate
         # files — and neither can dictate until it has finished.
@@ -379,6 +398,10 @@ def ask_to_enable(parent=None, first_run: bool = False) -> bool | None:
             "Set it up now? There is a one-time download first. Dictation keeps working "
             "while it runs, and “pywhispr disable-gpu” undoes it."
         )
+    if directml_offer:
+        # A different, smaller download, and the honest version of the promise.
+        body = body.replace("Saying yes downloads more. ", "")
+        body = body.replace('“pywhispr disable-gpu”', '“pywhispr disable-directml”')
     box.setInformativeText(body)
     download = box.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
     later = box.addButton("No", QMessageBox.ButtonRole.RejectRole)

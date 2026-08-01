@@ -67,6 +67,12 @@ APPROXIMATE_DOWNLOAD_MB = 1200
 # worst of both.
 MINIMUM_DRIVER = 580
 
+# CUDA 13 dropped Maxwell, Pascal and Volta, so a GTX 1080 (6.1) has no kernels in
+# the wheels above however new its driver is — and 580 is the last branch that
+# still supports those cards, so the driver check alone waves them through.
+# Turing is the floor.
+MINIMUM_COMPUTE = 7.5
+
 
 def install_dir() -> Path:
     """Where the libraries live — overridable, since they are 1.2 GB extracted.
@@ -115,6 +121,29 @@ def nvidia_driver_version() -> float | None:
     return float(f"{match.group(1)}.{match.group(2)}") if match else None
 
 
+def compute_capability() -> float | None:
+    """The GPU's compute capability, or None if it cannot be determined.
+
+    Same source as the driver version, one query later. None is not "too old": an
+    older ``nvidia-smi`` has no ``compute_cap`` field, and refusing on that would
+    turn a missing field into a missing feature.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"(\d+)\.(\d+)", result.stdout)
+    return float(f"{match.group(1)}.{match.group(2)}") if match else None
+
+
 def is_installed() -> bool:
     """Are the libraries already on disk? Says nothing about whether they work."""
     directory = install_dir()
@@ -134,6 +163,14 @@ def can_offer() -> tuple[bool, str]:
         return False, (
             f"the NVIDIA driver is {driver:g}; CUDA 13 needs {MINIMUM_DRIVER} or newer. "
             "Updating the driver and trying again will work."
+        )
+    compute = compute_capability()
+    if compute is not None and compute < MINIMUM_COMPUTE:
+        # Refused here rather than after the download: the wheels install fine and
+        # the failure only appears when a session runs, 1.2 GB later.
+        return False, (
+            f"this GPU is compute capability {compute:g}; CUDA 13 needs "
+            f"{MINIMUM_COMPUTE:g} or newer, so its libraries have no kernels for it"
         )
     return True, ""
 

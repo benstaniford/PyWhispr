@@ -45,6 +45,11 @@ class Config:
     # a path on another drive when C: has no room. See storage.py.
     model_cache_dir: str | None = None
     cuda_dir: str | None = None
+    directml_dir: str | None = None
+    # DirectML is the GPU path for cards CUDA 13 cannot use (pre-Turing NVIDIA, and
+    # every AMD or Intel GPU). None means "use it if it has been downloaded"; False
+    # turns it off without deleting it. See directml.py.
+    use_directml: bool | None = None
     max_recording_seconds: int = 120
     play_sounds: bool = True
     paste_delay_ms: int = 150

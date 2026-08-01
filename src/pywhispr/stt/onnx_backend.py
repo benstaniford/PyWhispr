@@ -18,7 +18,10 @@ log = logging.getLogger(__name__)
 DEFAULT_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 
 CPU_ONLY = ["CPUExecutionProvider"]
-PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+# CUDA first where it exists, then DirectML for the cards CUDA 13 will not serve.
+# Only one of the two is ever advertised: they come from different builds of
+# onnxruntime, and pywhispr.directml decides which one gets imported.
+PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
 
 # Fewer threads than cores, by a lot. Parakeet TDT decodes autoregressively, so
 # the graph is thousands of small ops and thread synchronisation dominates: on 15s
@@ -188,11 +191,12 @@ class OnnxBackend(STTBackend):
         )
 
         providers = [p for p in PREFERRED_PROVIDERS if p in advertised] or CPU_ONLY
-        if "CUDAExecutionProvider" not in providers:
+        if not any(p != "CPUExecutionProvider" for p in providers):
             log.warning(
-                "CUDAExecutionProvider not available (found: %s) — transcription will run "
-                "on CPU. For an RTX GPU, install onnxruntime-gpu>=1.22 with a CUDA 12.8+ "
-                "runtime and driver >=570.",
+                "No GPU provider available (found: %s) — transcription will run on CPU. "
+                "For an RTX GPU, install onnxruntime-gpu>=1.22 with a CUDA 12.8+ runtime "
+                "and driver >=570; for anything older, or an AMD or Intel GPU, "
+                "\"pywhispr enable-directml\".",
                 ", ".join(advertised),
             )
 
@@ -225,16 +229,19 @@ class OnnxBackend(STTBackend):
 
         in_use = session_providers(self._model)
         on_gpu = any(p != "CPUExecutionProvider" for p in in_use)
-        if "CUDAExecutionProvider" in providers and not on_gpu:
+        wanted_gpu = [p for p in providers if p != "CPUExecutionProvider"]
+        if wanted_gpu and not on_gpu:
             # The trap this whole dance exists for: onnxruntime accepts the
             # provider, drops it when the session is built, and says nothing, so
             # the app looks GPU-accelerated while every transcription is on the
             # CPU. Ask the sessions, not the list we passed in.
             log.warning(
-                "CUDA was requested but the sessions run on %s — transcription is on the CPU. "
-                "onnxruntime needs a full CUDA 13 + cuDNN 9 runtime; the pip wheels are "
-                "nvidia-cuda-runtime, nvidia-cublas, nvidia-cudnn-cu13 and nvidia-cufft "
-                "(the last from https://pypi.nvidia.com).",
+                "%s was requested but the sessions run on %s — transcription is on the CPU. "
+                "For CUDA, onnxruntime needs a full CUDA 13 + cuDNN 9 runtime: the pip wheels "
+                "are nvidia-cuda-runtime, nvidia-cublas, nvidia-cudnn-cu13 and nvidia-cufft "
+                "(the last from https://pypi.nvidia.com). For DirectML, the GPU has to support "
+                "DirectX 12.",
+                ", ".join(wanted_gpu),
                 ", ".join(sorted(in_use)) or "the CPU",
             )
 
