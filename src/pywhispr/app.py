@@ -179,6 +179,7 @@ class PyWhisprApp(QObject):
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
         self._load_model = load
+        self._offer_another_drive()
         if self._offer_gpu_before_downloading():
             return  # the model load waits for the CUDA setup to finish
         self._begin_model_load()
@@ -187,6 +188,56 @@ class PyWhisprApp(QObject):
         log.info("Loading %s (a first run downloads the model)...", self.backend.name)
         self._show_model_download()
         self._worker.submit(self._load_model)
+
+    def _offer_another_drive(self) -> None:
+        """Ask where the downloads should go, while asking still changes anything.
+
+        Before the GPU question, because it decides where the CUDA libraries land
+        too, and before any load, because afterwards the bytes are already on the
+        wrong drive. Silent unless a location is already configured or the default
+        one has room — see storage_dialog.should_ask.
+        """
+        if self.cfg.model_cache_dir or self.cfg.cuda_dir:
+            return
+        from pywhispr.download import model_cached
+
+        if model_cached():
+            return
+        from pywhispr.ui.storage_dialog import ask_where_to_store, should_ask
+
+        if not should_ask():
+            return
+        base = ask_where_to_store()
+        if base is None:
+            return
+
+        from pywhispr.storage import apply_overrides, set_base_dir
+
+        set_base_dir(self.cfg, base)
+        save_config(self.cfg)
+        # The environment alone is not enough here: asking the question imported
+        # huggingface_hub.constants to find the default, so its HF_HUB_CACHE is
+        # already fixed at the old path.
+        apply_overrides(self.cfg)
+        self._redirect_hf_cache()
+
+    def _redirect_hf_cache(self) -> None:
+        """Make the already-imported huggingface_hub honour the new directory.
+
+        Patching the constant is enough because only ``constants`` has been imported
+        so far: the modules that copy the value out of it come in later, with
+        ``onnx_asr`` inside the model load. Failing is not fatal either way — the
+        choice is saved, so a restart picks it up.
+        """
+        target = self.cfg.model_cache_dir
+        if not target:
+            return
+        try:
+            import huggingface_hub.constants as hf
+
+            hf.HF_HUB_CACHE = target
+        except Exception:
+            log.debug("Could not redirect the live model cache path", exc_info=True)
 
     def _offer_gpu_before_downloading(self) -> bool:
         """Ask about the GPU first, while the choice still saves a download.
