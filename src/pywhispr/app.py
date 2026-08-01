@@ -179,6 +179,7 @@ class PyWhisprApp(QObject):
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
         self._load_model = load
+        self._offer_another_drive()
         if self._offer_gpu_before_downloading():
             return  # the model load waits for the CUDA setup to finish
         self._begin_model_load()
@@ -188,6 +189,56 @@ class PyWhisprApp(QObject):
         self._show_model_download()
         self._worker.submit(self._load_model)
 
+    def _offer_another_drive(self) -> None:
+        """Ask where the downloads should go, while asking still changes anything.
+
+        Before the GPU question, because it decides where the CUDA libraries land
+        too, and before any load, because afterwards the bytes are already on the
+        wrong drive. Silent unless a location is already configured or the default
+        one has room — see storage_dialog.should_ask.
+        """
+        if self.cfg.model_cache_dir or self.cfg.cuda_dir:
+            return
+        from pywhispr.download import model_cached
+
+        if model_cached():
+            return
+        from pywhispr.ui.storage_dialog import ask_where_to_store, should_ask
+
+        if not should_ask():
+            return
+        base = ask_where_to_store()
+        if base is None:
+            return
+
+        from pywhispr.storage import apply_overrides, set_base_dir
+
+        set_base_dir(self.cfg, base)
+        save_config(self.cfg)
+        # The environment alone is not enough here: asking the question imported
+        # huggingface_hub.constants to find the default, so its HF_HUB_CACHE is
+        # already fixed at the old path.
+        apply_overrides(self.cfg)
+        self._redirect_hf_cache()
+
+    def _redirect_hf_cache(self) -> None:
+        """Make the already-imported huggingface_hub honour the new directory.
+
+        Patching the constant is enough because only ``constants`` has been imported
+        so far: the modules that copy the value out of it come in later, with
+        ``onnx_asr`` inside the model load. Failing is not fatal either way — the
+        choice is saved, so a restart picks it up.
+        """
+        target = self.cfg.model_cache_dir
+        if not target:
+            return
+        try:
+            import huggingface_hub.constants as hf
+
+            hf.HF_HUB_CACHE = target
+        except Exception:
+            log.debug("Could not redirect the live model cache path", exc_info=True)
+
     def _offer_gpu_before_downloading(self) -> bool:
         """Ask about the GPU first, while the choice still saves a download.
 
@@ -195,20 +246,18 @@ class PyWhisprApp(QObject):
         quantised weights the GPU has no use for are already on disk. True means the
         setup is running and will start the model load when it is done.
         """
-        from pywhispr.cuda import can_offer
         from pywhispr.download import model_cached
 
         if model_cached() or not self.cfg.offer_gpu_setup:
             return False
-        worth_it, why_not = can_offer()
-        if not worth_it:
-            log.debug("Not offering GPU acceleration: %s", why_not)
+        kind = self._acceleration_on_offer()
+        if kind is None:
             return False
 
         from pywhispr.ui.setup_window import ask_to_enable
 
         self._asked_about_gpu = True
-        answer = ask_to_enable(first_run=True)
+        answer = ask_to_enable(first_run=True, kind=kind)
         if answer is None:
             self.cfg.offer_gpu_setup = False
             save_config(self.cfg)
@@ -216,19 +265,41 @@ class PyWhisprApp(QObject):
         if not answer:
             return False
 
-        # Full precision from here on: the GPU is slower on the quantised weights,
-        # so fetching them as well would be the waste this ordering avoids.
-        self.cfg.model_quantization = ""
-        save_config(self.cfg)
-        self.backend = create_backend(self.cfg)
+        if kind == "cuda":
+            # Full precision from here on: the GPU is slower on the quantised
+            # weights, so fetching them as well would be the waste this ordering
+            # avoids. DirectML keeps whatever is configured — see setup_window.
+            self.cfg.model_quantization = ""
+            save_config(self.cfg)
+            self.backend = create_backend(self.cfg)
         self._waiting_for_gpu_setup = True
-        self._run_gpu_setup(first_run=True)
+        self._run_gpu_setup(first_run=True, kind=kind)
         return True
 
-    def _run_gpu_setup(self, first_run: bool = False):
+    def _acceleration_on_offer(self) -> str | None:
+        """"cuda", "directml", or None — which GPU path is worth offering here.
+
+        CUDA first because it is much faster where it runs at all; DirectML is the
+        fallback for what CUDA 13 dropped (pre-Turing NVIDIA) and never covered
+        (AMD, Intel).
+        """
+        from pywhispr import cuda, directml
+
+        worth_it, why_not = cuda.can_offer()
+        if worth_it:
+            return "cuda"
+        log.debug("Not offering CUDA: %s", why_not)
+
+        worth_it, why_not_dml = directml.can_offer()
+        if worth_it:
+            return "directml"
+        log.debug("Not offering DirectML either: %s", why_not_dml)
+        return None
+
+    def _run_gpu_setup(self, first_run: bool = False, kind: str = "cuda"):
         window = self._setup_window()
         window.setup_finished.connect(self._on_gpu_setup_finished)
-        window.start_gpu_setup(first_run=first_run)
+        window.start_gpu_setup(first_run=first_run, kind=kind)
         return window
 
     def _setup_window(self):
@@ -368,7 +439,6 @@ class PyWhisprApp(QObject):
         This is the path for an existing install, where the model is already
         downloaded and there is nothing left to save by asking first.
         """
-        from pywhispr.cuda import can_offer
         from pywhispr.stt.onnx_backend import session_providers
 
         if not self.cfg.offer_gpu_setup or self._asked_about_gpu:
@@ -376,26 +446,27 @@ class PyWhisprApp(QObject):
         providers = session_providers(getattr(self.backend, "_model", None))
         if any(p != "CPUExecutionProvider" for p in providers):
             return  # already accelerated
-        worth_it, why_not = can_offer()
-        if not worth_it:
-            log.debug("Not offering GPU acceleration: %s", why_not)
+        if self._acceleration_on_offer() is None:
             return
         self._enable_gpu(asked_by_user=False)
 
     def _enable_gpu(self, asked_by_user: bool = True) -> None:
-        from pywhispr.cuda import can_offer, is_installed
+        from pywhispr import cuda, directml
         from pywhispr.ui.foreground import show_in_front
         from pywhispr.ui.setup_window import ask_to_enable
 
         if self._progress_window is not None and self._progress_window.gpu_running:
             show_in_front(self._progress_window)  # already doing it
             return
-        worth_it, why_not = can_offer()
-        if asked_by_user and not worth_it and not is_installed():
-            self.tray.notify("GPU acceleration not available", why_not)
-            return
+        kind = self._acceleration_on_offer()
+        if kind is None:
+            already = cuda.is_installed() or directml.is_installed()
+            if asked_by_user and not already:
+                self.tray.notify("GPU acceleration not available", cuda.can_offer()[1])
+                return
+            kind = "directml" if directml.is_installed() else "cuda"
 
-        answer = ask_to_enable()
+        answer = ask_to_enable(kind=kind)
         if answer is None:
             self.cfg.offer_gpu_setup = False
             save_config(self.cfg)
@@ -404,7 +475,7 @@ class PyWhisprApp(QObject):
         if not answer:
             return
         # Reuses the window if the model is still downloading into it.
-        self._run_gpu_setup()
+        self._run_gpu_setup(kind=kind)
 
     def _on_model_failed(self, message: str) -> None:
         """Model load failed: stay alive and keep saying so.

@@ -449,8 +449,16 @@ class TestGpuOffer:
         ask.assert_not_called()
 
     def test_not_offered_without_an_nvidia_driver(self, app):
-        ask, _ = self._ready(app, driver=None)
+        with patch("pywhispr.directml.can_offer", return_value=(False, "no DirectX 12 GPU")):
+            ask, _ = self._ready(app, driver=None)
         ask.assert_not_called()
+
+    def test_directml_is_offered_when_cuda_cannot_help(self, app):
+        """A pre-Turing NVIDIA card, or an AMD or Intel one, has no other option."""
+        with patch("pywhispr.directml.can_offer", return_value=(True, "")):
+            ask, _ = self._ready(app, driver=None)
+        ask.assert_called_once()
+        assert ask.call_args.kwargs["kind"] == "directml"
 
     def test_not_offered_once_declined_for_good(self, app):
         with (
@@ -475,6 +483,8 @@ class TestGpuOffer:
         with (
             patch("pywhispr.cuda.can_offer", return_value=(False, "no NVIDIA GPU was found")),
             patch("pywhispr.cuda.is_installed", return_value=False),
+            patch("pywhispr.directml.can_offer", return_value=(False, "no DirectX 12 GPU")),
+            patch("pywhispr.directml.is_installed", return_value=False),
             patch("pywhispr.ui.setup_window.ask_to_enable") as ask,
         ):
             app._enable_gpu(asked_by_user=True)
