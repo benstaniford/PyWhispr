@@ -19,8 +19,10 @@ app on the CPU rather than broken.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import re
 import sys
 import zipfile
 from collections.abc import Callable
@@ -40,6 +42,12 @@ APPROXIMATE_DOWNLOAD_MB = 130
 # Written last, so a half-extracted directory never counts as installed.
 MARKER = "READY"
 
+# Written when the download turns out not to load, so it is never activated again.
+# Without it a broken install is retried every start, and the ImportError moves from
+# the verification subprocess into the app's own model load — no dictation, no crash,
+# no clue.
+BROKEN_MARKER = "BROKEN"
+
 
 def install_dir() -> Path:
     from pywhispr.cuda import _config_or_none
@@ -50,7 +58,21 @@ def install_dir() -> Path:
 
 def is_installed() -> bool:
     target = install_dir()
+    if (target / BROKEN_MARKER).exists():
+        return False
     return (target / MARKER).exists() and (target / "onnxruntime" / "__init__.py").exists()
+
+
+def interpreter_tag() -> str:
+    """The wheel tag this interpreter can load, e.g. "cp312".
+
+    onnxruntime ships one wheel per Python version, and picking the newest by
+    version number alone fetched a cp314 wheel for a cp312 app — which installs
+    perfectly and then fails with "DLL load failed while importing
+    onnxruntime_pybind11_state". The CUDA wheels never needed this: they are
+    ``py3-none-win_amd64`` and carry no interpreter tag at all.
+    """
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
 
 
 def is_active() -> bool:
@@ -123,6 +145,37 @@ Progress = Callable[[float, str], bool]
 """Called with (fraction done, what is happening); return False to cancel."""
 
 
+def wheel_url(client) -> str:
+    """The newest ``onnxruntime-directml`` wheel *this* interpreter can load.
+
+    PEP 503 simple index, same as the CUDA wheels, but the filter is on the
+    interpreter tag as well as the platform — see :func:`interpreter_tag`.
+    """
+    response = client.get(f"{PYPI}/{PACKAGE}/", follow_redirects=True)
+    response.raise_for_status()
+    tag = interpreter_tag()
+    names = re.findall(r'href="([^"#]+)', response.text)
+    usable = [
+        url
+        for url in names
+        if url.endswith(".whl") and "win_amd64" in url and f"-{tag}-" in url
+    ]
+    if not usable:
+        raise RuntimeError(
+            f"No {PACKAGE} wheel for {tag} on win_amd64 — DirectML has no build for "
+            f"Python {sys.version_info.major}.{sys.version_info.minor}"
+        )
+    url = sorted(usable, key=_version_key)[-1]
+    log.info("Chose %s", url.rsplit("/", 1)[-1])
+    return url if url.startswith("http") else f"{PYPI}/{PACKAGE}/{url}"
+
+
+def _version_key(url: str) -> tuple[int, ...]:
+    name = url.rsplit("/", 1)[-1]
+    match = re.search(r"-(\d+(?:\.\d+)*)", name)
+    return tuple(int(part) for part in match.group(1).split(".")) if match else (0,)
+
+
 def download(progress: Progress | None = None, on_bytes: Callable[[int], None] | None = None) -> Path:
     """Fetch the DirectML build of onnxruntime and unpack it into its own directory.
 
@@ -130,8 +183,6 @@ def download(progress: Progress | None = None, on_bytes: Callable[[int], None] |
     onnxruntime that will be imported.
     """
     import httpx
-
-    from pywhispr.cuda import Wheel, _wheel_url
 
     def report(fraction: float, message: str) -> None:
         if progress is not None and not progress(fraction, message):
@@ -141,10 +192,11 @@ def download(progress: Progress | None = None, on_bytes: Callable[[int], None] |
     target.mkdir(parents=True, exist_ok=True)
     marker = target / MARKER
     marker.unlink(missing_ok=True)
+    (target / BROKEN_MARKER).unlink(missing_ok=True)  # a fresh attempt gets a fresh verdict
 
     with httpx.Client(timeout=60.0) as client, TemporaryDirectory() as scratch:
         report(0.0, f"Finding {PACKAGE}…")
-        url = _wheel_url(client, Wheel(PACKAGE, PYPI))
+        url = wheel_url(client)
         archive_path = Path(scratch) / url.rsplit("/", 1)[-1]
 
         with client.stream("GET", url, follow_redirects=True) as response:
@@ -212,6 +264,23 @@ def activate() -> bool:
             os.add_dll_directory(str(capi))
         except OSError:
             log.debug("Could not add %s as a DLL directory", capi, exc_info=True)
+
+    # Import it here rather than leaving it to the model load. A wheel that does not
+    # load is the failure this has actually had (a cp314 wheel under cp312), and it
+    # surfaced deep inside onnx_asr as an ImportError with no way back. Proving it
+    # now means one place to undo, and a marker so it is never tried again.
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception as exc:
+        log.error("The DirectML onnxruntime in %s does not load: %s", target, exc)
+        log.debug("DirectML import failure detail", exc_info=True)
+        with contextlib.suppress(OSError):
+            sys.path.remove(str(target))
+        with contextlib.suppress(OSError):
+            (target / BROKEN_MARKER).write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
+        sys.modules.pop("onnxruntime", None)  # a half-initialised module poisons the retry
+        return False
+
     log.info("DirectML onnxruntime activated from %s", target)
     return True
 
