@@ -266,6 +266,46 @@ class TestVariantChosenBeforeDownloading:
         assert backend._quantization is None
         assert backend.download_mb > 2000
 
+    def test_directml_also_keeps_full_precision(self, monkeypatch):
+        """Measured on a GTX 1080: int8 19.8s of speech in 1.3s, fp32 22.2s in 0.8s.
+
+        int8 has no GPU kernels under DirectML either, so the quantised ops fall
+        back to the CPU exactly as they do on CUDA.
+        """
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        monkeypatch.setattr(onnx_backend, "directml_is_active", lambda: True)
+        backend = OnnxBackend()
+        backend.choose_quantization()
+        assert backend._quantization is None
+        assert backend.download_mb > 2000
+
+    def test_no_gpu_of_either_kind_still_means_int8(self, monkeypatch):
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import CPU_QUANTIZATION, OnnxBackend
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        monkeypatch.setattr(onnx_backend, "directml_is_active", lambda: False)
+        backend = OnnxBackend()
+        backend.choose_quantization()
+        assert backend._quantization == CPU_QUANTIZATION
+
+    def test_a_broken_directml_module_does_not_stop_the_choice(self, monkeypatch):
+        """The variant has to be picked even if asking about DirectML explodes."""
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import CPU_QUANTIZATION, OnnxBackend
+
+        def explode():
+            raise RuntimeError("no directml")
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", lambda: False)
+        monkeypatch.setattr("pywhispr.directml.is_active", explode)
+        backend = OnnxBackend()
+        backend.choose_quantization()
+        assert backend._quantization == CPU_QUANTIZATION
+
     def test_an_explicit_choice_is_never_overridden(self, monkeypatch):
         from pywhispr.stt import onnx_backend
         from pywhispr.stt.onnx_backend import OnnxBackend

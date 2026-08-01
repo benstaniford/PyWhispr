@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
-from pywhispr.config import Config, load_config, save_config
+from pywhispr.config import Config, save_config
 from pywhispr.filler import filler_words, is_deletion_only, remove_fillers
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
@@ -137,7 +137,10 @@ class PyWhisprApp(QObject):
     # -- startup / shutdown ------------------------------------------------
 
     def start(self) -> None:
-        log_environment()
+        # Without importing onnxruntime: the GPU question has not been asked yet,
+        # and DirectML can only replace onnxruntime before its first import. The
+        # backend logs the version and providers when it loads.
+        log_environment(allow_onnxruntime_import=False)
         log.info(
             "Starting: hotkey=%s, device=%s, api=%s, max_recording=%ss",
             self.cfg.hotkey,
@@ -336,24 +339,52 @@ class PyWhisprApp(QObject):
             save_config(self.cfg)
             self.backend = create_backend(self.cfg)
             log.info("GPU setup did not work out; loading the CPU model instead")
+        else:
+            self._activate_directml_if_just_installed()
         self._begin_model_load()
+
+    def _activate_directml_if_just_installed(self) -> None:
+        """Swap in the DirectML onnxruntime now, while that is still possible.
+
+        Nothing has imported onnxruntime yet on this path — the startup report is
+        asked not to — so the download that just finished can take effect in this
+        process. Miss this moment and it only applies after a restart, which is
+        what the first run used to do while promising nothing.
+        """
+        from pywhispr import directml
+
+        if not directml.is_installed() or directml.is_active():
+            return
+        if directml.activate():
+            self.backend = create_backend(self.cfg)  # a fresh backend picks the variant again
 
     def _show_model_download(self) -> None:
         """On a first run, show the download rather than a silent "Loading…"."""
         from pywhispr.download import model_cached
 
-        if model_cached():
-            return
-
-        # download_mb depends on which variant will be fetched, and load() does
-        # not decide until it runs on the worker thread — so the size shown here
-        # would be the full-precision one whatever we were about to download.
+        # Before the cached check, not after: download_mb depends on which variant
+        # will be fetched, and load() does not decide until it runs on the worker
+        # thread — so the size shown here would be the full-precision one whatever
+        # we were about to download.
         choose = getattr(self.backend, "choose_quantization", None)
         if choose is not None:
             try:
                 choose()
             except Exception:
                 log.debug("Could not pick the model variant early", exc_info=True)
+
+        # Against the size of *this* variant. A flat 400 MB meant that switching
+        # from int8 to full precision — enabling a GPU does exactly that — saw
+        # 785 MB in the cache, called it cached, and fetched 2.4 GB behind a
+        # motionless "Loading model…". One such fetch died after 202 seconds with
+        # nothing on screen to say so.
+        expected_mb = getattr(self.backend, "download_mb", None)
+        # A backend is duck-typed here, so the size is only trusted when it really
+        # is one; anything else falls back to the old flat threshold rather than
+        # throwing from the middle of startup.
+        minimum_mb = int(expected_mb * 0.8) if isinstance(expected_mb, (int, float)) else 400
+        if model_cached(minimum_mb=minimum_mb):
+            return
 
         self._setup_window().track_model_download(self.backend.download_mb)
 
@@ -787,7 +818,13 @@ def run_app() -> int:
     from PySide6.QtGui import QIcon
 
     from pywhispr.logging_setup import install_qt_message_handler
+    from pywhispr.startup import prepare
     from pywhispr.tray import app_pixmap
+
+    # Here rather than only in cli.main: the frozen executable with no arguments
+    # comes straight here, so this is the one place every path to the app passes
+    # through. Idempotent, so arriving via cli.main is not a problem.
+    config = prepare("run")
 
     install_qt_message_handler()  # before QApplication, to catch platform-plugin gripes
     app = QApplication(sys.argv)
@@ -795,6 +832,6 @@ def run_app() -> int:
     app.setWindowIcon(QIcon(app_pixmap()))
     app.setQuitOnLastWindowClosed(False)  # tray app: no windows most of the time
 
-    whispr = PyWhisprApp(load_config())
+    whispr = PyWhisprApp(config)
     whispr.start()
     return app.exec()

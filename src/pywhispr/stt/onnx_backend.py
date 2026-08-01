@@ -94,6 +94,21 @@ def cuda_libraries_load() -> bool:
     return True
 
 
+def directml_is_active() -> bool:
+    """Is this process running the DirectML build of onnxruntime?
+
+    Asked without importing onnxruntime: the answer decides which model variant to
+    download, and that happens before the backend loads anything.
+    """
+    try:
+        from pywhispr.directml import is_active
+
+        return is_active()
+    except Exception:  # pragma: no cover - directml is optional at runtime
+        log.debug("Could not tell whether DirectML is active", exc_info=True)
+        return False
+
+
 def session_providers(model) -> set[str]:
     """Which execution providers the loaded model's sessions are *actually* using.
 
@@ -158,12 +173,21 @@ class OnnxBackend(STTBackend):
         return DOWNLOAD_MB.get(self._quantization, DOWNLOAD_MB[None])
 
     def choose_quantization(self) -> None:
-        """Pick the variant before it is downloaded, unless the user set one."""
+        """Pick the variant before it is downloaded, unless the user set one.
+
+        Any GPU means full precision, not just CUDA. Measured on a GTX 1080 under
+        DirectML: int8 transcribed 19.8s of speech in 1.3s, full precision did 22.2s
+        in 0.8s — the same ~2x the other way round that CUDA shows, because the
+        quantised ops have no GPU kernels either way and fall back to the CPU.
+        """
         if self._quantization is not None:
             return
-        if not cuda_libraries_load():
-            self._quantization = CPU_QUANTIZATION
-            log.info("No usable CUDA runtime: loading the quantised model (%s)", CPU_QUANTIZATION)
+        if cuda_libraries_load():
+            return
+        if directml_is_active():
+            return
+        self._quantization = CPU_QUANTIZATION
+        log.info("No usable GPU runtime: loading the quantised model (%s)", CPU_QUANTIZATION)
 
     def load(self) -> None:
         import onnx_asr

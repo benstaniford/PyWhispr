@@ -167,7 +167,7 @@ class TestDownload:
                 return FakeResponse()
 
         monkeypatch.setattr("httpx.Client", lambda **_kwargs: FakeClient())
-        monkeypatch.setattr(cuda, "_wheel_url", lambda _client, _wheel: "https://example/x.whl")
+        monkeypatch.setattr(directml, "wheel_url", lambda _client: "https://example/x.whl")
 
         directml.download()
         assert (install_dir / "onnxruntime" / "capi" / "onnxruntime.dll").exists()
@@ -178,6 +178,97 @@ class TestDownload:
         directml.remove()
         assert install_dir.exists() is False
         assert directml.is_installed() is False
+
+
+class TestWheelChoice:
+    """A cp314 wheel installs perfectly under cp312 and then fails to load."""
+
+    INDEX = """
+      <a href="onnxruntime_directml-1.24.4-cp312-cp312-win_amd64.whl">a</a>
+      <a href="onnxruntime_directml-1.24.4-cp314-cp314-win_amd64.whl">b</a>
+      <a href="onnxruntime_directml-1.25.0-cp314-cp314-win_amd64.whl">c</a>
+      <a href="onnxruntime_directml-1.23.0-cp312-cp312-win_amd64.whl">d</a>
+      <a href="onnxruntime_directml-1.99.0-cp312-cp312-linux_x86_64.whl">e</a>
+    """
+
+    class FakeClient:
+        def __init__(self, text):
+            self._text = text
+
+        def get(self, _url, **_kwargs):
+            text = self._text
+
+            class Response:
+                @property
+                def text(self):
+                    return text
+
+                def raise_for_status(self):
+                    pass
+
+            return Response()
+
+    def test_picks_the_newest_wheel_for_this_interpreter(self, monkeypatch):
+        monkeypatch.setattr(directml, "interpreter_tag", lambda: "cp312")
+        url = directml.wheel_url(self.FakeClient(self.INDEX))
+        assert url.endswith("onnxruntime_directml-1.24.4-cp312-cp312-win_amd64.whl")
+
+    def test_a_newer_wheel_for_another_python_is_not_used(self, monkeypatch):
+        monkeypatch.setattr(directml, "interpreter_tag", lambda: "cp312")
+        url = directml.wheel_url(self.FakeClient(self.INDEX))
+        assert "cp314" not in url
+
+    def test_the_platform_still_has_to_match(self, monkeypatch):
+        monkeypatch.setattr(directml, "interpreter_tag", lambda: "cp312")
+        assert "linux" not in directml.wheel_url(self.FakeClient(self.INDEX))
+
+    def test_says_so_when_this_python_has_no_wheel(self, monkeypatch):
+        monkeypatch.setattr(directml, "interpreter_tag", lambda: "cp399")
+        with pytest.raises(RuntimeError, match="cp399"):
+            directml.wheel_url(self.FakeClient(self.INDEX))
+
+    def test_the_tag_describes_the_running_interpreter(self):
+        assert directml.interpreter_tag() == f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+class TestQuarantine:
+    """A download that does not load must not be retried every start."""
+
+    def test_a_failing_import_is_marked_broken_and_undone(self, install_dir, monkeypatch):
+        make_installed(install_dir)
+        monkeypatch.delitem(sys.modules, "onnxruntime", raising=False)
+
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __import__
+
+        def fail_onnxruntime(name, *args, **kwargs):
+            if name == "onnxruntime":
+                raise ImportError("DLL load failed while importing onnxruntime_pybind11_state")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", fail_onnxruntime)
+        assert directml.activate() is False
+        assert str(install_dir) not in sys.path
+        assert (install_dir / directml.BROKEN_MARKER).exists()
+
+    def test_a_broken_install_no_longer_counts_as_installed(self, install_dir):
+        make_installed(install_dir)
+        (install_dir / directml.BROKEN_MARKER).write_text("ImportError\n", encoding="utf-8")
+        assert directml.is_installed() is False
+
+    def test_a_broken_install_is_never_activated(self, install_dir):
+        make_installed(install_dir)
+        (install_dir / directml.BROKEN_MARKER).write_text("ImportError\n", encoding="utf-8")
+        assert directml.activate() is False
+
+    def test_it_can_be_offered_again_after_being_marked_broken(self, install_dir, monkeypatch):
+        make_installed(install_dir)
+        (install_dir / directml.BROKEN_MARKER).write_text("ImportError\n", encoding="utf-8")
+        monkeypatch.setattr(directml, "has_direct3d_device", lambda: True)
+        monkeypatch.setattr(cuda, "is_installed", lambda: False)
+        monkeypatch.setattr(cuda, "can_offer", lambda: (False, "no NVIDIA GPU"))
+        with patch("sys.platform", "win32"):
+            offer, _why = directml.can_offer()
+        assert offer is True
 
 
 class TestCudaComputeGate:

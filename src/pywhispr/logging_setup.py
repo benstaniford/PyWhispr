@@ -218,13 +218,21 @@ def _package_version(module_name: str) -> str:
         return f"unknown ({exc})"
 
 
-def _onnxruntime_lines() -> list[str]:
+def _onnxruntime_lines(allow_import: bool = True) -> list[str]:
     """What ONNX Runtime thinks it can do — the usual Windows failure point.
 
     ``get_available_providers()`` listing CUDA does *not* mean CUDA will work:
     onnxruntime-gpu advertises the provider it was compiled with, and only
     fails when a session is actually created without the CUDA runtime present.
+
+    ``allow_import`` exists because importing it has a side effect that outlives
+    this report: DirectML is a *different build* of onnxruntime and can only be
+    swapped in before the first import, so a version line logged at startup used
+    to cost a first-run user their GPU until they restarted. The backend logs the
+    same facts when it loads, which is late enough to be true.
     """
+    if not allow_import and "onnxruntime" not in sys.modules:
+        return ["onnxruntime: not imported yet (the model load reports it)"]
     try:
         import onnxruntime
     except Exception as exc:
@@ -286,8 +294,13 @@ def _tls_verification_lines() -> list[str]:
         return [f"tls verification: unknown ({exc!r})"]
 
 
-def environment_report() -> list[str]:
-    """Everything worth knowing about this machine, as loggable lines."""
+def environment_report(allow_onnxruntime_import: bool = True) -> list[str]:
+    """Everything worth knowing about this machine, as loggable lines.
+
+    ``allow_onnxruntime_import`` is False for the app's own startup report, where
+    importing onnxruntime would pin the CUDA build before the user has been asked
+    about DirectML. ``pywhispr diagnose`` leaves it True: it loads a model anyway.
+    """
     from pywhispr.config import config_path
 
     frozen = getattr(sys, "frozen", False)
@@ -306,13 +319,13 @@ def environment_report() -> list[str]:
             for name in ("PySide6", "numpy", "sounddevice", "pynput", "onnx-asr", "huggingface-hub")
         ),
     ]
-    lines += _onnxruntime_lines()
+    lines += _onnxruntime_lines(allow_onnxruntime_import)
     lines += _model_cache_lines()
     lines += _network_env_lines()
     lines += _tls_verification_lines()
     return lines
 
 
-def log_environment() -> None:
-    for line in environment_report():
+def log_environment(allow_onnxruntime_import: bool = True) -> None:
+    for line in environment_report(allow_onnxruntime_import):
         log.info("%s", line)
