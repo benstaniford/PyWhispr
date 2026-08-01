@@ -7,6 +7,7 @@ verified and was then never activated.
 """
 
 import os
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -184,3 +185,40 @@ class TestDownloadVisibility:
 
     def test_a_part_downloaded_variant_still_shows_progress(self, monkeypatch):
         assert self._windows_shown(monkeypatch, cache_mb=300, expected_mb=650) == ["window"]
+
+
+class TestFirstRunNeedsNoRestart:
+    """DirectML can only replace onnxruntime before its first import, and the
+    startup report used to do that import before the user had even been asked."""
+
+    def test_the_startup_report_does_not_import_onnxruntime(self, monkeypatch):
+        from pywhispr import logging_setup
+
+        monkeypatch.delitem(sys.modules, "onnxruntime", raising=False)
+        lines = logging_setup.environment_report(allow_onnxruntime_import=False)
+        assert "onnxruntime" not in sys.modules
+        assert any("not imported yet" in line for line in lines)
+
+    def test_diagnose_still_reports_it(self, monkeypatch):
+        """It loads a model anyway, so there is nothing left to protect."""
+        from pywhispr import logging_setup
+
+        fake = type(sys)("onnxruntime")
+        fake.__version__ = "9.9.9"
+        fake.get_device = lambda: "CPU-DML"
+        fake.get_available_providers = lambda: ["DmlExecutionProvider"]
+        monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+        lines = logging_setup.environment_report(allow_onnxruntime_import=True)
+        assert any("9.9.9" in line for line in lines)
+
+    def test_an_already_imported_runtime_is_still_reported(self, monkeypatch):
+        """Nothing is gained by hiding it once the decision has been made."""
+        from pywhispr import logging_setup
+
+        fake = type(sys)("onnxruntime")
+        fake.__version__ = "1.2.3"
+        fake.get_device = lambda: "CPU"
+        fake.get_available_providers = lambda: ["CPUExecutionProvider"]
+        monkeypatch.setitem(sys.modules, "onnxruntime", fake)
+        lines = logging_setup.environment_report(allow_onnxruntime_import=False)
+        assert any("1.2.3" in line for line in lines)

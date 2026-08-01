@@ -137,7 +137,10 @@ class PyWhisprApp(QObject):
     # -- startup / shutdown ------------------------------------------------
 
     def start(self) -> None:
-        log_environment()
+        # Without importing onnxruntime: the GPU question has not been asked yet,
+        # and DirectML can only replace onnxruntime before its first import. The
+        # backend logs the version and providers when it loads.
+        log_environment(allow_onnxruntime_import=False)
         log.info(
             "Starting: hotkey=%s, device=%s, api=%s, max_recording=%ss",
             self.cfg.hotkey,
@@ -336,7 +339,24 @@ class PyWhisprApp(QObject):
             save_config(self.cfg)
             self.backend = create_backend(self.cfg)
             log.info("GPU setup did not work out; loading the CPU model instead")
+        else:
+            self._activate_directml_if_just_installed()
         self._begin_model_load()
+
+    def _activate_directml_if_just_installed(self) -> None:
+        """Swap in the DirectML onnxruntime now, while that is still possible.
+
+        Nothing has imported onnxruntime yet on this path — the startup report is
+        asked not to — so the download that just finished can take effect in this
+        process. Miss this moment and it only applies after a restart, which is
+        what the first run used to do while promising nothing.
+        """
+        from pywhispr import directml
+
+        if not directml.is_installed() or directml.is_active():
+            return
+        if directml.activate():
+            self.backend = create_backend(self.cfg)  # a fresh backend picks the variant again
 
     def _show_model_download(self) -> None:
         """On a first run, show the download rather than a silent "Loading…"."""
