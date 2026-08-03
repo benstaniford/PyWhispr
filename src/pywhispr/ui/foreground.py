@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtCore import QObject, QRect, QTimer
+from PySide6.QtGui import QCursor, QGuiApplication, QScreen
 from PySide6.QtWidgets import QWidget
 
 log = logging.getLogger(__name__)
@@ -51,6 +51,65 @@ def centre_on_active_screen(window: QWidget) -> None:
     window.move(frame.topLeft())
 
 
+def screen_for_foreground_window() -> QScreen | None:
+    """The screen holding the window the user is typing into.
+
+    The pointer is not a reliable stand-in here: dictation is hands-off, so the
+    mouse is wherever it was left. Falls back to the primary screen whenever the
+    foreground window or its monitor cannot be resolved — which is everything
+    off Windows.
+    """
+    rect = _foreground_monitor_rect()
+    if rect is not None:
+        # Qt's Windows plugin lays screens out in the native virtual-desktop pixel
+        # coordinates, so a Win32 monitor rect can be handed straight to screenAt:
+        # devicePixelRatio scales painting, not the layout. Checked on a mixed
+        # 100%/125% desktop, where every availableGeometry() equalled its rcWork.
+        # Matching on QScreen.name() is what does *not* work — on Windows that is
+        # the monitor's model name ("ZOWIE XL LCD"), not the GDI device name.
+        screen = QGuiApplication.screenAt(rect.center())
+        if screen is not None:
+            return screen
+        log.debug("No Qt screen at the foreground monitor's centre")
+    return QGuiApplication.primaryScreen()
+
+
+def _foreground_monitor_rect() -> QRect | None:
+    """Rect of the monitor most of the foreground window sits on, in Win32 coords."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFOEXW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+                ("szDevice", wintypes.WCHAR * 32),
+            ]
+
+        MONITOR_DEFAULTTONEAREST = 0x0002
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        r = info.rcMonitor
+        return QRect(r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:
+        log.debug("Could not resolve the foreground window's monitor", exc_info=True)
+        return None
+
+
 def _force_foreground(window: QWidget) -> None:
     """The Win32 half of the same request; Qt's is advisory here."""
     if sys.platform != "win32":
@@ -81,4 +140,4 @@ def _re_assert(window: QWidget) -> None:
         pass
 
 
-__all__ = ["centre_on_active_screen", "show_in_front"]
+__all__ = ["centre_on_active_screen", "screen_for_foreground_window", "show_in_front"]

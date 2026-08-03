@@ -1,9 +1,9 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
 
-from pywhispr.ui.overlay import OverlayWindow
+from pywhispr.ui.overlay import BOTTOM_MARGIN, PILL_HEIGHT, PILL_WIDTH, OverlayWindow
 
 HWND_TOP = 0
 HWND_TOPMOST = -1
@@ -86,6 +86,35 @@ def test_raising_never_activates(overlay, user32):
         assert call.args[6] & SWP_NOACTIVATE
     user32.SetForegroundWindow.assert_not_called()
     assert not overlay.isActiveWindow()
+
+
+class FakeScreen:
+    def __init__(self, area):
+        self._area = area
+
+    def availableGeometry(self):
+        return self._area
+
+
+def test_pill_lands_on_the_focused_windows_monitor(overlay):
+    """Ahmed dictates into a window on the left-hand monitor; the pill has to
+    follow it there instead of sitting on the primary screen."""
+    area = QRect(-1920, 0, 1920, 1080)
+    with patch(
+        "pywhispr.ui.overlay.screen_for_foreground_window",
+        return_value=FakeScreen(area),
+    ):
+        overlay.show_recording()
+    pos = overlay.pos()
+    assert pos.x() == area.x() + (area.width() - PILL_WIDTH) // 2
+    assert pos.y() == area.y() + area.height() - PILL_HEIGHT - BOTTOM_MARGIN
+
+
+def test_no_resolvable_screen_leaves_the_overlay_where_it_is(overlay):
+    overlay.move(100, 100)
+    with patch("pywhispr.ui.overlay.screen_for_foreground_window", return_value=None):
+        overlay.show_recording()  # must not raise
+    assert overlay.isVisible()
 
 
 def test_z_order_failure_does_not_break_the_overlay(overlay, user32):
