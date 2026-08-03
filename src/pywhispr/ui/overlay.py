@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
 
+from pywhispr.ui.foreground import screen_for_foreground_window
 from pywhispr.ui.waveform import WaveformWidget
 
 log = logging.getLogger(__name__)
@@ -97,7 +98,14 @@ class OverlayWindow(QWidget):
         self._topmost_timer.start()
 
     def _move_to_bottom_center(self) -> None:
-        screen = QApplication.primaryScreen()
+        """Bottom-centre of the screen the user is typing on, not the primary one.
+
+        Resolved at show() time, so moving to another monitor between dictations
+        takes the pill with you.
+        """
+        screen = screen_for_foreground_window()
+        if screen is None:
+            return
         geo = screen.availableGeometry()
         x = geo.x() + (geo.width() - self.width()) // 2
         y = geo.y() + geo.height() - self.height() - BOTTOM_MARGIN
