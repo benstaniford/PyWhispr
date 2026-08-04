@@ -677,6 +677,26 @@ class TestAudioDucking:
         assert app.state == State.IDLE
         ducker.duck.assert_not_called()
 
+    def test_recorder_failure_on_stop_still_restores(self, app):
+        # PortAudio can raise from stream.stop()/close() (e.g. the microphone
+        # was unplugged mid-recording). The ducked volumes must come back
+        # anyway — Windows remembers per-app mixer levels forever.
+        ducker = self._ducked(app)
+        app._on_toggle()
+        app._test_recorder.stop.side_effect = OSError("stream died")
+        with pytest.raises(OSError):
+            app._on_toggle()
+        ducker.restore.assert_called_once()
+
+    def test_quit_restores_even_when_recorder_stop_fails(self, app):
+        ducker = self._ducked(app)
+        app._on_toggle()
+        app._test_recorder.recording = True
+        app._test_recorder.stop.side_effect = OSError("stream died")
+        with pytest.raises(OSError):
+            app._quit()
+        ducker.restore.assert_called_once()
+
     def test_max_duration_stop_restores(self, app):
         ducker = self._ducked(app)
         app._on_toggle()

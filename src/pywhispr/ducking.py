@@ -24,6 +24,8 @@ import os
 import sys
 from typing import Protocol
 
+from pywhispr.config import Config
+
 log = logging.getLogger(__name__)
 
 
@@ -98,7 +100,7 @@ class SessionDucker:
             log.debug("Restored %d audio session(s)", len(saved))
 
 
-def create_ducker(cfg) -> Ducker:
+def create_ducker(cfg: Config) -> Ducker:
     """The right ducker for this config and platform; NoOp unless both agree."""
     if not cfg.duck_other_audio:
         return NoOpDucker()

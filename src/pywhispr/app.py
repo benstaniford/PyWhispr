@@ -399,11 +399,14 @@ class PyWhisprApp(QObject):
         self.listener.stop()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
-        if self.recorder.recording:
-            self.recorder.stop()
-        # Unconditional: Windows remembers per-app mixer levels, so quitting
-        # while ducked would leave the user's other apps quiet for good.
-        self.ducker.restore()
+        try:
+            if self.recorder.recording:
+                self.recorder.stop()
+        finally:
+            # Unconditional, and shielded from a failing recorder stop: Windows
+            # remembers per-app mixer levels, so quitting while ducked would
+            # leave the user's other apps quiet for good.
+            self.ducker.restore()
         self._worker.shutdown(wait=False)
         QApplication.quit()
 
@@ -579,8 +582,13 @@ class PyWhisprApp(QObject):
 
     def _stop_recording(self) -> None:
         self._max_duration_timer.stop()
-        audio = self.recorder.stop()
-        self.ducker.restore()
+        try:
+            audio = self.recorder.stop()
+        finally:
+            # Even when PortAudio fails to close the stream, the other apps
+            # must get their volume back — Windows would remember the ducked
+            # levels forever.
+            self.ducker.restore()
         self._play(self._stop_sound)
         self._set_state(State.TRANSCRIBING)
         self.overlay.show_status("Transcribing…")
