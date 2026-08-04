@@ -651,3 +651,47 @@ class TestModelDownloadProgress:
         window = self._window(app)
         app._on_model_failed("RuntimeError: offline")
         assert "offline" in window.finish_model.call_args.args[0]
+
+
+class TestAudioDucking:
+    """Other apps go quiet while recording; every exit path brings them back."""
+
+    def _ducked(self, app):
+        app.ducker = MagicMock()
+        app._on_model_ready()
+        return app.ducker
+
+    def test_recording_ducks_and_stopping_restores(self, app):
+        ducker = self._ducked(app)
+        app._on_toggle()  # start recording
+        ducker.duck.assert_called_once()
+        ducker.restore.assert_not_called()
+        app._on_toggle()  # stop
+        ducker.restore.assert_called_once()
+
+    def test_mic_failure_does_not_duck(self, app):
+        ducker = self._ducked(app)
+        app._test_recorder.start.side_effect = OSError("no microphone")
+        with patch.object(app.tray, "notify", create=True):
+            app._on_toggle()
+        assert app.state == State.IDLE
+        ducker.duck.assert_not_called()
+
+    def test_max_duration_stop_restores(self, app):
+        ducker = self._ducked(app)
+        app._on_toggle()
+        app._on_max_duration()
+        ducker.restore.assert_called_once()
+
+    def test_quit_restores_even_mid_recording(self, app):
+        # Windows remembers per-app mixer levels, so quitting while ducked
+        # would leave the user's other apps quiet for good.
+        ducker = self._ducked(app)
+        app._on_toggle()
+        app._quit()
+        ducker.restore.assert_called_once()
+
+    def test_ducking_is_off_by_default(self, app):
+        from pywhispr.ducking import NoOpDucker
+
+        assert isinstance(app.ducker, NoOpDucker)
