@@ -69,6 +69,8 @@ this. (On Windows, double-tap works without any special permission.)
 | `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
+| `duck_other_audio` | `false` | Windows only: turn other applications' audio down while recording and put it back when the recording stops |
+| `duck_volume` | `0.0` | How loud other applications stay while ducked, as a 0–1 fraction of their current volume — the default silences them; `0.2` keeps them at 20% |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
 | `clipboard_restore_delay_ms` | `300` | Wait before restoring your old clipboard |
 | `join_continuations` | `true` | Add the missing space when you dictate again straight after a previous dictation — see [Continuation joining](#continuation-joining) |

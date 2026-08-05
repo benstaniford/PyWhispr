@@ -21,6 +21,9 @@ dependencies = [
     "parakeet-mlx>=0.5 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "onnx-asr[hub]>=0.12 ; sys_platform != 'darwin'",
     "onnxruntime-gpu>=1.22 ; sys_platform == 'win32' or sys_platform == 'linux'",
+    # Per-application session volumes, for ducking other apps while recording
+    # (see ducking.py).
+    "pycaw>=20240210 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

@@ -52,6 +52,12 @@ class Config:
     use_directml: bool | None = None
     max_recording_seconds: int = 120
     play_sounds: bool = True
+    # Quieten everything else while recording: other applications' audio is
+    # turned down to duck_volume (a 0–1 fraction of their current level; the
+    # default 0 silences them) and put back when the recording stops.
+    # Windows only — see ducking.py.
+    duck_other_audio: bool = False
+    duck_volume: float = 0.0
     paste_delay_ms: int = 150
     clipboard_restore_delay_ms: int = 300
     # Continuation joining: make consecutive dictations read as one passage.
