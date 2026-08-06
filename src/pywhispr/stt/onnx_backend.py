@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from pywhispr import priority
 from pywhispr.stt.base import SAMPLE_RATE, STTBackend
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,15 @@ PREFERRED_PROVIDERS = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExec
 # of speech, 4 threads 0.43s, 8 threads 0.81s, 16 threads 1.96s. 0 restores
 # onnxruntime's own default.
 DEFAULT_THREADS = 4
+
+# Same reasoning, one level down: onnxruntime's intra-op pool spin-waits between
+# ops, which wins on an idle machine and loses on a busy one — with thousands of
+# micro-ops the spinners burn their quantum, get descheduled mid-graph, and every
+# decode step pays a scheduler round-trip. On 18s of speech (CUDA, 16 cores, 15
+# busy): spinning on 0.37s, off 0.25s. Idle it costs (0.27s against 0.42s), which
+# the priority boost in transcribe() more than pays back (0.22s) — the pair is
+# what was measured, and stt_allow_spinning = true undoes half of it.
+SPINNING_OPTION = "session.intra_op.allow_spinning"
 
 # int8 is ~2x on the CPU and ~4x *slower* on the GPU (1.60s against 0.12s), where
 # the quantised ops have no CUDA kernels. So it is chosen, not defaulted.
@@ -150,10 +160,12 @@ class OnnxBackend(STTBackend):
         model_id: str | None = None,
         quantization: str | None = None,
         threads: int | None = None,
+        allow_spinning: bool = False,
     ):
         self._model_id = model_id or DEFAULT_MODEL
         self._quantization = quantization
         self._threads = DEFAULT_THREADS if threads is None else threads
+        self._allow_spinning = allow_spinning
         self._model = None
         self._providers: list[str] = []
 
@@ -225,11 +237,12 @@ class OnnxBackend(STTBackend):
             )
 
         log.info(
-            "Loading %s with providers %s, %s intra-op thread(s) "
+            "Loading %s with providers %s, %s intra-op thread(s), spinning %s "
             "(a first run downloads about %d MB)",
             self.name,
             providers,
             self._threads or "onnxruntime's default",
+            "on" if self._allow_spinning else "off",
             self.download_mb,
         )
         started = time.monotonic()
@@ -293,9 +306,12 @@ class OnnxBackend(STTBackend):
         import onnxruntime
 
         options = None
-        if self._threads:
+        if self._threads or not self._allow_spinning:
             options = onnxruntime.SessionOptions()
-            options.intra_op_num_threads = self._threads
+            if self._threads:
+                options.intra_op_num_threads = self._threads
+            if not self._allow_spinning:
+                options.add_session_config_entry(SPINNING_OPTION, "0")
         self._model = onnx_asr.load_model(
             self._model_id,
             providers=providers,
@@ -308,7 +324,10 @@ class OnnxBackend(STTBackend):
         if self._model is None:
             raise RuntimeError("Backend not loaded; call load() first")
         started = time.monotonic()
-        text = self._model.recognize(audio.astype(np.float32), sample_rate=sample_rate)
+        # Both callers (dictation and the network API) come through here on the
+        # one STT worker, so this is the single place the boost belongs.
+        with priority.boosted():
+            text = self._model.recognize(audio.astype(np.float32), sample_rate=sample_rate)
         log.debug(
             "Transcribed %.1fs of audio in %.2fs",
             len(audio) / sample_rate,

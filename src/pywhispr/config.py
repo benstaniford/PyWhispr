@@ -37,6 +37,10 @@ class Config:
     # onnxruntime's default of one per core — see stt/onnx_backend.py. None uses
     # PyWhispr's tuned default; 0 restores onnxruntime's.
     stt_threads: int | None = None
+    # Let onnxruntime's intra-op threads spin-wait between ops. Off by default:
+    # it is a small win on an idle machine and a large loss on a busy one, which
+    # is the case that hurts. ONNX only — see stt/onnx_backend.py.
+    stt_allow_spinning: bool = False
     # Offer the one-time CUDA download when there is an NVIDIA GPU going unused.
     # Set false (or answer "Never") to stop asking; the tray menu still has it.
     offer_gpu_setup: bool = True

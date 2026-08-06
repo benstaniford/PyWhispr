@@ -1,4 +1,5 @@
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,13 @@ from pywhispr.stt import create_backend
 from pywhispr.stt.wav import read_wav_mono_16k
 
 FIXTURE = Path(__file__).parent / "fixtures" / "hello_world.wav"
+
+
+@contextmanager
+def _spy(log: list):
+    log.append("enter")
+    yield
+    log.append("exit")
 
 
 def fake_model(*providers: str):
@@ -171,8 +179,41 @@ class TestOnnxProviderFallback:
         from pywhispr.stt.onnx_backend import OnnxBackend
 
         onnx_asr, _ = modules
-        OnnxBackend(threads=0).load()
+        OnnxBackend(threads=0, allow_spinning=True).load()
         assert onnx_asr.load_model.call_args.kwargs["sess_options"] is None
+
+    def test_spinning_is_disabled_by_default(self, modules):
+        """Spin-waiting between thousands of micro-ops loses on a loaded CPU."""
+        from pywhispr.stt.onnx_backend import SPINNING_OPTION, OnnxBackend
+
+        onnx_asr, _ = modules
+        OnnxBackend().load()
+        options = onnx_asr.load_model.call_args.kwargs["sess_options"]
+        options.add_session_config_entry.assert_any_call(SPINNING_OPTION, "0")
+
+    def test_spinning_can_be_left_on(self, modules):
+        """So the trade-off can be measured both ways on a given machine."""
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        onnx_asr, _ = modules
+        OnnxBackend(allow_spinning=True).load()
+        options = onnx_asr.load_model.call_args.kwargs["sess_options"]
+        options.add_session_config_entry.assert_not_called()
+
+    def test_transcribing_runs_at_a_raised_priority(self, modules):
+        """The decode loop is one CPU thread in a tray app that never gets a boost."""
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import OnnxBackend
+
+        backend = OnnxBackend()
+        backend.load()
+        inside = []
+        with patch.object(
+            onnx_backend.priority, "boosted", lambda: _spy(inside)
+        ):  # records whether recognize() ran inside the block
+            backend._model.recognize.side_effect = lambda *a, **k: inside.append("recognize") or ""
+            backend.transcribe(np.zeros(16000, dtype=np.float32))
+        assert inside == ["enter", "recognize", "exit"]
 
     def test_cuda_dll_directories_are_added_from_the_nvidia_wheels(self, tmp_path, monkeypatch):
         """The pip CUDA wheels hide their DLLs where nothing searches."""
