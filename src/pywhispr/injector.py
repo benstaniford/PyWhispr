@@ -17,6 +17,7 @@ import sys
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from pywhispr import perf
 from pywhispr.platform_setup import check_macos_accessibility
 
 log = logging.getLogger(__name__)
@@ -55,8 +56,10 @@ class TextInjector(QObject):
         # Only restore plain text; putting images/files back reliably is not
         # worth the complexity, so those are left overwritten.
         self._old_text = clipboard.text() if mime is not None and mime.hasText() else None
+        perf.mark("clipboard-read")
 
         clipboard.setText(text)
+        perf.mark("clipboard-set")
         # Delay lets the clipboard settle before pasting (Windows especially).
         QTimer.singleShot(self._paste_delay_ms, self._paste)
 
@@ -69,7 +72,9 @@ class TextInjector(QObject):
         return QApplication.clipboard()
 
     def _paste(self) -> None:
+        perf.mark("paste-timer")
         self._send_paste_keystroke()
+        perf.mark("keystroke-sent")
         # The target app must read the clipboard before we restore it.
         QTimer.singleShot(self._restore_delay_ms, self._restore)
 
@@ -77,13 +82,16 @@ class TextInjector(QObject):
         from pynput.keyboard import Controller, Key
 
         controller = Controller()
+        perf.mark("controller-built")
         modifier = Key.cmd if sys.platform == "darwin" else Key.ctrl
         with controller.pressed(modifier):
             controller.tap("v")
 
     def _restore(self) -> None:
+        perf.mark("restore-timer")
         if self._old_text is not None:
             self._clipboard().setText(self._old_text)
             self._old_text = None
+        perf.mark("clipboard-restored")
         log.debug("Insert sequence finished")
         self.finished.emit(True)

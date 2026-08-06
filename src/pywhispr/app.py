@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
+from pywhispr import perf
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
@@ -135,6 +136,8 @@ class PyWhisprApp(QObject):
         self._transcribed.connect(self._on_transcribed)
         self._transcribe_failed.connect(self._on_transcribe_failed)
         self.injector.finished.connect(self._on_insert_finished)
+
+        perf.install_loop_monitor(self)
 
     # -- startup / shutdown ------------------------------------------------
 
@@ -600,6 +603,9 @@ class PyWhisprApp(QObject):
             try:
                 text = self.backend.transcribe(audio)
                 log.info("Transcription took %.1fs", time.monotonic() - started)
+                # From here to the text landing in the document is the part the
+                # user sees as "the pill vanished but nothing was pasted yet".
+                perf.begin("post-transcribe")
                 self._transcribed.emit(text)
             except Exception as exc:
                 log.exception("Transcription failed")
@@ -613,8 +619,10 @@ class PyWhisprApp(QObject):
             self._stop_recording()
 
     def _on_transcribed(self, text: str) -> None:
+        perf.mark("signal-delivered")
         # Before the empty check: a recording of nothing but "um" leaves nothing.
         text = self._cleaned(text)
+        perf.mark("fillers")
         if not text.strip():
             log.info("Empty transcription, nothing to insert")
             self._finish_cycle()
@@ -622,9 +630,13 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
+        perf.mark("overlay-hidden")
         # Vocabulary next: it can change the opening word, which is the word
         # the join then decides about.
-        self._last_inserted = self._joined(self._corrected(text))
+        corrected = self._corrected(text)
+        perf.mark("vocabulary")
+        self._last_inserted = self._joined(corrected)
+        perf.mark("join")
         self.injector.insert(self._last_inserted)
 
     def _cleaned(self, text: str) -> str:
@@ -723,6 +735,8 @@ class PyWhisprApp(QObject):
         self._finish_cycle()
 
     def _finish_cycle(self) -> None:
+        perf.mark("cycle-finished")
+        perf.end()
         self._last_inserted = None
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)
