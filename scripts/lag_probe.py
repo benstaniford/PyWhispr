@@ -228,12 +228,25 @@ def run_driver(args: argparse.Namespace) -> int:
             time.sleep(2.0)  # let the schedulers settle
 
         app = QApplication(sys.argv)
+        monitor_parent = QTimer()  # something with the right thread affinity to own it
+        perf.install_loop_monitor(monitor_parent)
         sent_at: list[float] = []
 
         class TimedInjector(TextInjector):
             def _send_paste_keystroke(self) -> None:
                 sent_at.append(time.time())
                 super()._send_paste_keystroke()
+
+            def insert(self, text: str) -> None:
+                super().insert(text)
+                if args.flush:
+                    # Qt leaves an IDataObject on the clipboard and renders the
+                    # text on demand, which is a COM call back into this
+                    # process. Flushing renders it now, so the pasting app never
+                    # has to wait for our event loop.
+                    started = time.perf_counter()
+                    ctypes.windll.ole32.OleFlushClipboard()
+                    perf.mark("ole-flush")
 
         injector = TimedInjector(args.paste_delay, args.restore_delay)
         user32 = ctypes.windll.user32
@@ -293,7 +306,7 @@ def run_driver(args: argparse.Namespace) -> int:
 
 
 def report(args: argparse.Namespace, rows: list[dict]) -> None:
-    label = f"load={args.load} hook={args.hook} gil={args.gil}"
+    label = f"load={args.load} hook={args.hook} gil={args.gil} flush={args.flush}"
     print(f"\n== {label}, {len(rows)} iteration(s) ==")
     for key in ("insert_to_sent_ms", "sendinput_ms", "render_ms", "total_ms"):
         values = [row[key] for row in rows if row[key] is not None]
@@ -316,6 +329,9 @@ def main() -> int:
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--load", type=int, default=0, help="CPU spinner processes")
     parser.add_argument("--gil", action="store_true", help="also add in-process GIL pressure")
+    parser.add_argument(
+        "--flush", action="store_true", help="OleFlushClipboard after the set (fix candidate)"
+    )
     parser.add_argument(
         "--no-hook", dest="hook", action="store_false", help="do not install our keyboard hook"
     )
