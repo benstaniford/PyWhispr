@@ -227,8 +227,8 @@ def run_driver(args: argparse.Namespace) -> int:
         if load or gil_stop:
             time.sleep(2.0)  # let the schedulers settle
 
-        app = QApplication(sys.argv)
-        monitor_parent = QTimer()  # something with the right thread affinity to own it
+        QApplication(sys.argv)  # kept alive by Qt's own global instance
+        monitor_parent = QTimer()  # gives the loop monitor's timer a parent to live on
         perf.install_loop_monitor(monitor_parent)
         sent_at: list[float] = []
 
@@ -244,12 +244,10 @@ def run_driver(args: argparse.Namespace) -> int:
                     # text on demand, which is a COM call back into this
                     # process. Flushing renders it now, so the pasting app never
                     # has to wait for our event loop.
-                    started = time.perf_counter()
                     ctypes.windll.ole32.OleFlushClipboard()
                     perf.mark("ole-flush")
 
         injector = TimedInjector(args.paste_delay, args.restore_delay)
-        user32 = ctypes.windll.user32
         rows = []
 
         for iteration in range(args.iterations):
