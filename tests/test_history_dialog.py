@@ -71,7 +71,6 @@ def test_copying_shows_a_tick_then_goes_back_to_the_copy_glyph(qtbot):
 
 
 def test_there_is_no_paste_button(qtbot):
-    """Double-click and Return paste; a button for it was a third thing to aim at."""
     dialog = HistoryDialog(["newest"])
     qtbot.addWidget(dialog)
 
@@ -98,8 +97,6 @@ def test_copy_button_stays_visible_at_minimum_width(qtbot):
 
     button = copy_button(dialog, 0)
     assert button.width() > 0
-    # Against the viewport, not the row: the row itself used to be laid out at
-    # the width of its whole preview, which put the button off the dialog.
     assert button.geometry().right() <= dialog._list.viewport().width()
 
 
@@ -137,7 +134,6 @@ def test_closing_before_the_copy_feedback_expires_is_survivable(qtbot):
 
 
 def test_the_only_close_control_is_the_window_frame(qtbot):
-    """A ✕ of our own sat directly under the window's own one — two close buttons."""
     dialog = HistoryDialog(["newest", "older"])
     qtbot.addWidget(dialog)
 
