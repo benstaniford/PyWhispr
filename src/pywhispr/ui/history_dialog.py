@@ -5,8 +5,9 @@ someone who dictated the words seconds ago and only needs to tell them apart.
 The whole transcript is on the row's tooltip for the case where they can't.
 
 Each row carries its own copy button, so a transcript can be taken to the
-clipboard without pasting it anywhere — the dialog closes either way, and the
-paste needs the caret that the picker itself stole the focus from.
+clipboard without pasting it anywhere; copying leaves the picker open, pasting
+closes it. Double-click and Return are what paste — there is no Paste button,
+because the row is what you are aiming at either way.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -38,9 +38,9 @@ COPIED_FEEDBACK_MS = 1200
 # space, and more means a scrollbar rather than a window down to the taskbar.
 MAX_VISIBLE_ROWS = 6
 
-# Corner radius shared by the rows, the copy buttons and the paste button, so
-# the dialog reads as one thing rather than three widgets from three decades.
-RADIUS_PX = 8
+# Rounding for the row hover and the copy button — enough to look deliberate,
+# not so much that it stops looking like the rest of the app's dialogs.
+RADIUS_PX = 6
 
 
 def _icon(theme_name: str, fallback: str) -> tuple[QIcon | None, str]:
@@ -55,61 +55,41 @@ def _rgba(colour: QColor, alpha: int) -> str:
 
 
 def _stylesheet(palette: QPalette) -> str:
-    """The dialog's look, derived from the palette so dark and light both work.
+    """The little that is styled here: row hover, the copy button, the scrollbar.
 
-    Every colour here comes out of the active palette rather than being written
-    down: Qt follows the system light/dark setting, and a hard-coded surface or
-    text colour is the one thing guaranteed to be wrong in the other mode.
+    Everything else — the window background, the list frame, the selection — is
+    left to the platform style, so this dialog looks like the app's others. The
+    few colours that are set come out of the active palette rather than being
+    written down: a hard-coded tint is the one thing guaranteed to be wrong in
+    whichever of dark and light it was not picked in.
     """
-    text = palette.color(QPalette.ColorRole.WindowText)
-    surface = palette.color(QPalette.ColorRole.Base)
-    accent = palette.color(QPalette.ColorRole.Highlight)
-    accent_text = palette.color(QPalette.ColorRole.HighlightedText)
-    dark = surface.lightness() < 128
+    text = palette.color(QPalette.ColorRole.Text)
+    dark = palette.color(QPalette.ColorRole.Base).lightness() < 128
 
     # A tint of the text colour reads as "slightly raised off the surface" in
     # either mode, where a fixed grey only does in one.
     hover = _rgba(text, 20 if dark else 14)
-    pressed = _rgba(text, 34 if dark else 26)
-    muted = _rgba(text, 150)
-    selected = _rgba(accent, 70 if dark else 48)
+    pressed = _rgba(text, 38 if dark else 30)
+    muted = _rgba(text, 160)
     handle = _rgba(text, 55)
     handle_hover = _rgba(text, 95)
     return f"""
-    QDialog {{ background: {surface.name()}; }}
-    QLabel#historyHint {{ color: {muted}; padding-left: 2px; }}
-
-    QListWidget {{ background: transparent; border: none; outline: none; }}
-    QListWidget::item {{ border-radius: {RADIUS_PX}px; }}
-    QListWidget::item:selected {{ background: {selected}; }}
-
     QWidget#historyRow {{ background: transparent; border-radius: {RADIUS_PX}px; }}
     QWidget#historyRow:hover {{ background: {hover}; }}
 
     QToolButton {{
         border: none;
         background: transparent;
-        border-radius: {RADIUS_PX - 2}px;
+        border-radius: {RADIUS_PX}px;
         color: {muted};
     }}
-    QToolButton:hover {{ background: {pressed}; color: {text.name()}; }}
+    QToolButton:hover {{ background: {hover}; color: {text.name()}; }}
     QToolButton:pressed {{ background: {pressed}; }}
 
-    QPushButton {{
-        background: {accent.name()};
-        color: {accent_text.name()};
-        border: none;
-        border-radius: {RADIUS_PX - 2}px;
-        padding: 7px 20px;
-        font-weight: 600;
-    }}
-    QPushButton:hover {{ background: {accent.lighter(115).name()}; }}
-    QPushButton:pressed {{ background: {accent.darker(110).name()}; }}
-
-    QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0px; }}
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0px; }}
     QScrollBar::handle:vertical {{
         background: {handle};
-        border-radius: 4px;
+        border-radius: 5px;
         min-height: 28px;
     }}
     QScrollBar::handle:vertical:hover {{ background: {handle_hover}; }}
@@ -166,13 +146,12 @@ class HistoryDialog(QDialog):
         self.setStyleSheet(_stylesheet(self.palette()))
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         # No close button of our own: the window's own ✕ is right above it, and
         # two of them one under the other is what this dialog used to show.
-        hint = QLabel("Pick one to paste where the caret is now")
-        hint.setObjectName("historyHint")
+        hint = QLabel("Double-click one to paste it where the caret is now, or copy it.")
+        hint.setStyleSheet("color: gray;")  # as the app's other dialogs do it
         layout.addWidget(hint)
 
         self._list = QListWidget()
@@ -187,6 +166,8 @@ class HistoryDialog(QDialog):
             # viewport and carried the copy button off the right-hand edge.
             item.setSizeHint(QSize(0, row.sizeHint().height()))
             self._list.setItemWidget(item, row)
+        # Connected before the first selection, so row 0 is recoloured too.
+        self._list.currentItemChanged.connect(self._recolour_for_selection)
         self._list.setCurrentRow(0)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Double-click, or Return with the list focused, is the whole interaction.
@@ -194,15 +175,8 @@ class HistoryDialog(QDialog):
         layout.addWidget(self._list)
         self._fit_list_to_contents()
 
-        paste = QPushButton("Paste")
-        paste.setDefault(True)
-        paste.setCursor(Qt.CursorShape.PointingHandCursor)
-        paste.clicked.connect(self.accept)
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        footer.addWidget(paste)
-        layout.addLayout(footer)
-
+        # No Paste button: double-click and Return already paste, and a button
+        # for it only adds a third thing to aim at in a dialog this small.
         self._list.setFocus()
         # The list is now exactly as tall as it needs to be; take the dialog
         # down with it rather than leaving the default window height.
@@ -245,6 +219,21 @@ class HistoryDialog(QDialog):
         row_layout.addWidget(button, 0)
         return row
 
+    def _recolour_for_selection(self, current, previous) -> None:
+        """Put the selected row's text on the platform's highlighted-text colour.
+
+        The rows are widgets, so the view's selection paints *behind* them and
+        their labels keep the ordinary text colour — black on a solid blue
+        selection, which is the one row you cannot read.
+        """
+        highlighted = self.palette().color(QPalette.ColorRole.HighlightedText).name()
+        for item, colour in ((previous, ""), (current, f"color: {highlighted};")):
+            row = None if item is None else self._list.itemWidget(item)
+            if row is None:
+                continue
+            for child in row.findChildren(QWidget):  # the preview and its copy button
+                child.setStyleSheet(colour)
+
     def _fit_list_to_contents(self) -> None:
         """Height of the rows there are, capped at MAX_VISIBLE_ROWS.
 
@@ -260,20 +249,30 @@ class HistoryDialog(QDialog):
         frame = 2 * self._list.frameWidth()
         self._list.setFixedHeight(visible * row_height + frame)
 
-    @staticmethod
-    def _copy(text: str, button: QToolButton) -> None:
+    def _copy(self, text: str, button: QToolButton) -> None:
         QGuiApplication.clipboard().setText(text)
-        icon, fallback = button.icon(), button.text()
+        icon, fallback, tooltip = button.icon(), button.text(), button.toolTip()
+        # Kept, not cleared, on the way back: the selected row's button carries a
+        # colour of its own (see _recolour_for_selection).
+        sheet = button.styleSheet()
         button.setIcon(QIcon())
         button.setText("✓")
+        button.setToolTip("Copied")
+        # The tick has to be spotted in passing, so it gets the accent colour and
+        # some weight rather than the muted grey the copy glyph sits in.
+        accent = self.palette().color(QPalette.ColorRole.Highlight)
+        button.setStyleSheet(f"color: {accent.name()}; font-weight: 700; font-size: 15px;")
+
+        def restore() -> None:
+            button.setStyleSheet(sheet)
+            button.setIcon(icon)
+            button.setText(fallback)
+            button.setToolTip(tooltip)
+
         # Bound to the button: copy, then close the picker before the feedback
         # expires, and a timer that outlived its widget would reach into a
         # deleted C++ object and take the app down.
-        QTimer.singleShot(
-            COPIED_FEEDBACK_MS,
-            button,
-            lambda: (button.setIcon(icon), button.setText(fallback)),
-        )
+        QTimer.singleShot(COPIED_FEEDBACK_MS, button, restore)
 
     def chosen(self) -> str | None:
         item = self._list.currentItem()

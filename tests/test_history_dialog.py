@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QDialog, QLabel, QToolButton
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QToolButton
 
 from pywhispr.ui.history_dialog import COPIED_FEEDBACK_MS, MAX_VISIBLE_ROWS, HistoryDialog
 
@@ -54,6 +54,28 @@ def test_row_copy_button_copies_that_whole_transcript(qtbot):
     # The full text, not the clipped preview, and not the selected row.
     assert QGuiApplication.clipboard().text() == long_text
     assert dialog.chosen() == "newest"
+
+
+def test_copying_shows_a_tick_then_goes_back_to_the_copy_glyph(qtbot):
+    dialog = HistoryDialog(["newest"])
+    qtbot.addWidget(dialog)
+    button = copy_button(dialog, 0)
+    before = button.text()
+
+    button.click()
+
+    assert button.text() == "✓"
+    assert button.toolTip() == "Copied"
+    qtbot.waitUntil(lambda: button.text() == before, timeout=COPIED_FEEDBACK_MS + 500)
+    assert button.toolTip() != "Copied"
+
+
+def test_there_is_no_paste_button(qtbot):
+    """Double-click and Return paste; a button for it was a third thing to aim at."""
+    dialog = HistoryDialog(["newest"])
+    qtbot.addWidget(dialog)
+
+    assert not dialog.findChildren(QPushButton)
 
 
 def test_copying_does_not_close_the_dialog(qtbot):
