@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QLabel, QToolButton
 
@@ -73,10 +74,11 @@ def test_copy_button_stays_visible_at_minimum_width(qtbot):
     dialog.show()
     qtbot.waitExposed(dialog)
 
-    row = dialog._list.itemWidget(dialog._list.item(0))
     button = copy_button(dialog, 0)
     assert button.width() > 0
-    assert button.geometry().right() <= row.width()
+    # Against the viewport, not the row: the row itself used to be laid out at
+    # the width of its whole preview, which put the button off the dialog.
+    assert button.geometry().right() <= dialog._list.viewport().width()
 
 
 def test_short_history_makes_a_short_dialog(qtbot):
@@ -112,11 +114,19 @@ def test_closing_before_the_copy_feedback_expires_is_survivable(qtbot):
     qtbot.wait(COPIED_FEEDBACK_MS + 200)  # would segfault on a deleted widget
 
 
-def test_close_button_rejects(qtbot):
+def test_the_only_close_control_is_the_window_frame(qtbot):
+    """A ✕ of our own sat directly under the window's own one — two close buttons."""
+    dialog = HistoryDialog(["newest", "older"])
+    qtbot.addWidget(dialog)
+
+    assert not [b for b in dialog.findChildren(QToolButton) if b.toolTip() == "Close"]
+
+
+def test_escape_rejects(qtbot):
     dialog = HistoryDialog(["newest"])
     qtbot.addWidget(dialog)
-    close = next(b for b in dialog.findChildren(QToolButton) if b.toolTip() == "Close")
+    dialog.show()
 
-    close.click()
+    qtbot.keyClick(dialog, Qt.Key.Key_Escape)
 
     assert dialog.result() == QDialog.DialogCode.Rejected

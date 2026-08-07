@@ -11,8 +11,8 @@ paste needs the caret that the picker itself stole the focus from.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFontMetrics, QGuiApplication, QIcon
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QIcon, QPalette
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -38,11 +38,84 @@ COPIED_FEEDBACK_MS = 1200
 # space, and more means a scrollbar rather than a window down to the taskbar.
 MAX_VISIBLE_ROWS = 6
 
+# Corner radius shared by the rows, the copy buttons and the paste button, so
+# the dialog reads as one thing rather than three widgets from three decades.
+RADIUS_PX = 8
+
 
 def _icon(theme_name: str, fallback: str) -> tuple[QIcon | None, str]:
     """A themed icon where the platform has one, else a text glyph."""
     icon = QIcon.fromTheme(theme_name)
     return (None, fallback) if icon.isNull() else (icon, "")
+
+
+def _rgba(colour: QColor, alpha: int) -> str:
+    """``colour`` at ``alpha`` (0-255) as a Qt stylesheet colour."""
+    return f"rgba({colour.red()},{colour.green()},{colour.blue()},{alpha})"
+
+
+def _stylesheet(palette: QPalette) -> str:
+    """The dialog's look, derived from the palette so dark and light both work.
+
+    Every colour here comes out of the active palette rather than being written
+    down: Qt follows the system light/dark setting, and a hard-coded surface or
+    text colour is the one thing guaranteed to be wrong in the other mode.
+    """
+    text = palette.color(QPalette.ColorRole.WindowText)
+    surface = palette.color(QPalette.ColorRole.Base)
+    accent = palette.color(QPalette.ColorRole.Highlight)
+    accent_text = palette.color(QPalette.ColorRole.HighlightedText)
+    dark = surface.lightness() < 128
+
+    # A tint of the text colour reads as "slightly raised off the surface" in
+    # either mode, where a fixed grey only does in one.
+    hover = _rgba(text, 20 if dark else 14)
+    pressed = _rgba(text, 34 if dark else 26)
+    muted = _rgba(text, 150)
+    selected = _rgba(accent, 70 if dark else 48)
+    handle = _rgba(text, 55)
+    handle_hover = _rgba(text, 95)
+    return f"""
+    QDialog {{ background: {surface.name()}; }}
+    QLabel#historyHint {{ color: {muted}; padding-left: 2px; }}
+
+    QListWidget {{ background: transparent; border: none; outline: none; }}
+    QListWidget::item {{ border-radius: {RADIUS_PX}px; }}
+    QListWidget::item:selected {{ background: {selected}; }}
+
+    QWidget#historyRow {{ background: transparent; border-radius: {RADIUS_PX}px; }}
+    QWidget#historyRow:hover {{ background: {hover}; }}
+
+    QToolButton {{
+        border: none;
+        background: transparent;
+        border-radius: {RADIUS_PX - 2}px;
+        color: {muted};
+    }}
+    QToolButton:hover {{ background: {pressed}; color: {text.name()}; }}
+    QToolButton:pressed {{ background: {pressed}; }}
+
+    QPushButton {{
+        background: {accent.name()};
+        color: {accent_text.name()};
+        border: none;
+        border-radius: {RADIUS_PX - 2}px;
+        padding: 7px 20px;
+        font-weight: 600;
+    }}
+    QPushButton:hover {{ background: {accent.lighter(115).name()}; }}
+    QPushButton:pressed {{ background: {accent.darker(110).name()}; }}
+
+    QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0px; }}
+    QScrollBar::handle:vertical {{
+        background: {handle};
+        border-radius: 4px;
+        min-height: 28px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {handle_hover}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+    """
 
 
 class _ElidingLabel(QLabel):
@@ -66,6 +139,16 @@ class _ElidingLabel(QLabel):
         # the preview, and the elision is a painting detail of the width.
         return self._full
 
+    def sizeHint(self) -> QSize:
+        # Zero width, real height. A QLabel asks for its whole text even under
+        # an Ignored size policy, and that hint propagates up through the row
+        # to the list item — which laid rows out wider than the viewport and
+        # left the copy button off the right-hand edge of the dialog.
+        return QSize(0, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, super().minimumSizeHint().height())
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         metrics = QFontMetrics(self.font())
@@ -79,20 +162,18 @@ class HistoryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Recent dictations")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
+        self.setStyleSheet(_stylesheet(self.palette()))
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        header.addWidget(QLabel("Pick one to paste where the caret is now:"))
-        header.addStretch(1)
-        close = QToolButton()
-        close.setText("✕")
-        close.setToolTip("Close")
-        close.setAutoRaise(True)
-        close.clicked.connect(self.reject)
-        header.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(header)
+        # No close button of our own: the window's own ✕ is right above it, and
+        # two of them one under the other is what this dialog used to show.
+        hint = QLabel("Pick one to paste where the caret is now")
+        hint.setObjectName("historyHint")
+        layout.addWidget(hint)
 
         self._list = QListWidget()
         for text in items:
@@ -101,7 +182,10 @@ class HistoryDialog(QDialog):
             item.setToolTip(text)
             self._list.addItem(item)
             row = self._make_row(text)
-            item.setSizeHint(row.sizeHint())
+            # Height from the row, width from the view: the row's own width hint
+            # is its whole preview, which laid the row out wider than the
+            # viewport and carried the copy button off the right-hand edge.
+            item.setSizeHint(QSize(0, row.sizeHint().height()))
             self._list.setItemWidget(item, row)
         self._list.setCurrentRow(0)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -112,6 +196,7 @@ class HistoryDialog(QDialog):
 
         paste = QPushButton("Paste")
         paste.setDefault(True)
+        paste.setCursor(Qt.CursorShape.PointingHandCursor)
         paste.clicked.connect(self.accept)
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -123,11 +208,23 @@ class HistoryDialog(QDialog):
         # down with it rather than leaving the default window height.
         self.adjustSize()
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # A row widget keeps the geometry the view gave it when it was added,
+        # which predates the dialog's final width; only a later resize corrects
+        # it. Without this the copy buttons start off the right-hand edge.
+        self._list.doItemsLayout()
+
     def _make_row(self, text: str) -> QWidget:
         """One list row: the preview, and a copy button for that transcript."""
         row = QWidget()
+        # Named so the stylesheet can give the row itself a hover state: the
+        # list's own ::item:hover never fires, because the row widget is what
+        # the mouse is actually over.
+        row.setObjectName("historyRow")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setContentsMargins(10, 8, 6, 8)
+        row_layout.setSpacing(8)
         label = _ElidingLabel(preview(text))
         label.setToolTip(text)
         row_layout.addWidget(label, 1)
@@ -140,6 +237,8 @@ class HistoryDialog(QDialog):
             button.setText(fallback)
         button.setToolTip("Copy to clipboard")
         button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedSize(28, 28)
         # Never squeezed out by a long preview, at any dialog width.
         button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         button.clicked.connect(lambda: self._copy(text, button))
