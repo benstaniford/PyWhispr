@@ -76,6 +76,46 @@ word; `caret.py` finds `preceding`.
   `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
   `sys.modules` and made later tests pass for the wrong reason. Fake both.
 
+## Transcript recall (`history.py` + `ui/history_dialog.py`)
+
+Auto-paste follows the focus, so a dictation aimed at a box that had lost focus
+is lost outright — the audio is gone. The last `HISTORY_SIZE` (10) transcripts
+are kept **in memory only** and a tray menu entry opens a picker that pastes the
+chosen one at the current caret. **No hotkey of its own** — a second global
+shortcut is a real cost (it can clash, it needs registering, it needs a config
+key and a failure path) for something reached once in a while.
+
+- What is remembered is the **corrected** transcript, *before* `join_text`: the
+  join belongs to the caret that dictation was aimed at, and re-pasting later
+  lands somewhere else entirely. `_context.invalidate()` for the same reason.
+- **The picker steals the focus it is about to paste into.** `remember_foreground()`
+  / `restore_foreground()` in `ui/foreground.py` put it back (Win32
+  `GetForegroundWindow`/`SetForegroundWindow`; no-ops elsewhere), then the paste
+  goes out one `FOCUS_RESTORE_MS` timer hop later — `SetForegroundWindow` only
+  works because *we* own the foreground at that moment, having just closed our
+  own dialog.
+- Per-row copy buttons, not one global one: the row is what identifies the
+  transcript, so the button belongs on it. Copying leaves the picker open —
+  pasting closes it, copying does not.
+- The dictation hotkey is silenced around any modal dialog (`_resume_listeners`),
+  so the chord pressed inside one cannot start a recording.
+- **Never log the transcripts** — lengths and counts only, like everything else
+  that touches the user's words.
+- The preview label elides, the copy button does not: a `QLabel`'s minimum width
+  is its whole text, so in a row layout the *button* is what gets clipped at the
+  dialog's minimum width. `_ElidingLabel` is free to shrink; the full transcript
+  is on the tooltip regardless.
+- The dialog is sized to its contents (`_fit_list_to_contents`), scrolling past
+  `MAX_VISIBLE_ROWS` — otherwise two transcripts sit above a column of nothing
+  and ten make a window taller than the screen.
+- The copy button's "copied" timer is **bound to the button**
+  (`QTimer.singleShot(ms, button, ...)`). Copy, then close the picker inside
+  `COPIED_FEEDBACK_MS`, and an unbound timer reaches into a deleted C++ object:
+  "libshiboken: Internal C++ object already deleted", app gone.
+- Testing gotcha: rows are `setItemWidget` widgets, so `item.text()` is empty —
+  assert on the row's `QLabel`, not the item. A scroll range is only real once
+  the dialog has been shown.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing

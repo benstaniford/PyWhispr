@@ -19,7 +19,6 @@ APP_NAME = "PyWhispr"
 DEFAULT_HOTKEY_MAC = "<cmd>+<shift>+<space>"
 DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
 
-
 def default_hotkey() -> str:
     return DEFAULT_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_HOTKEY_OTHER
 
