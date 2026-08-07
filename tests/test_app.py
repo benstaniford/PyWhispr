@@ -19,8 +19,9 @@ def app(qtbot, qapp):
         # Never read the developer's own vocabulary file: tests that assert on
         # exact transcripts would then depend on what is in it.
         patch("pywhispr.app.load_vocabulary", return_value=[]),
-        # Nothing here should claim a real system-wide hotkey.
-        patch("pywhispr.app.create_hotkey_listener"),
+        # Nothing here should claim a real system-wide hotkey. A fresh mock per
+        # call, so the dictation and recall listeners are told apart.
+        patch("pywhispr.app.create_hotkey_listener", side_effect=lambda *a, **k: MagicMock()),
     ):
         recorder = recorder_cls.return_value
         recorder.recording = False
@@ -715,3 +716,106 @@ class TestAudioDucking:
         from pywhispr.ducking import NoOpDucker
 
         assert isinstance(app.ducker, NoOpDucker)
+
+
+class TestHistoryRecall:
+    """A transcript that auto-pasted into the wrong window can be pasted again."""
+
+    def _ready(self, app):
+        app._on_model_ready()
+        assert app.state == State.IDLE
+
+    def _dictate(self, app, qtbot, text):
+        app._test_backend.transcribe.return_value = text
+        app._on_toggle()  # record
+        with patch.object(app.injector, "insert"):
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        app.injector.finished.emit(True)
+
+    def test_transcripts_are_remembered(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "first one")
+        self._dictate(app, qtbot, "second one")
+        assert list(app._history) == ["second one", "first one"]
+
+    def test_empty_transcripts_are_not_remembered(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "   ")
+        assert list(app._history) == []
+
+    def test_chosen_transcript_is_pasted(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "the lost sentence")
+        with (
+            patch(
+                "pywhispr.ui.history_dialog.HistoryDialog.choose",
+                return_value="the lost sentence",
+            ),
+            patch("pywhispr.ui.foreground.remember_foreground", return_value=1234) as remember,
+            patch("pywhispr.ui.foreground.restore_foreground") as restore,
+            patch.object(app.injector, "insert") as insert,
+        ):
+            app._show_history()
+            assert app.state == State.INSERTING
+            remember.assert_called_once()
+            # The focus goes back to where it was *before* the paste keystroke.
+            restore.assert_called_once_with(1234)
+            qtbot.waitUntil(lambda: insert.called, timeout=1000)
+            insert.assert_called_once_with("the lost sentence")
+        app.injector.finished.emit(True)
+        assert app.state == State.IDLE
+
+    def test_cancelling_pastes_nothing(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "the lost sentence")
+        with (
+            patch("pywhispr.ui.history_dialog.HistoryDialog.choose", return_value=None),
+            patch.object(app.injector, "insert") as insert,
+        ):
+            app._show_history()
+        qtbot.wait(50)
+        insert.assert_not_called()
+        assert app.state == State.IDLE
+
+    def test_empty_history_only_notifies(self, app):
+        self._ready(app)
+        with (
+            patch("pywhispr.ui.history_dialog.HistoryDialog.choose") as choose,
+            patch.object(app.injector, "insert") as insert,
+        ):
+            app._show_history()
+        choose.assert_not_called()
+        insert.assert_not_called()
+
+    def test_ignored_while_recording(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "the lost sentence")
+        app._on_toggle()  # recording
+        with patch("pywhispr.ui.history_dialog.HistoryDialog.choose") as choose:
+            app._show_history()
+        choose.assert_not_called()
+        assert app.state == State.RECORDING
+
+    def test_no_recall_hotkey_when_unconfigured(self, qtbot, qapp):
+        from pywhispr.app import PyWhisprApp
+        from pywhispr.config import Config
+
+        with (
+            patch("pywhispr.app.create_backend"),
+            patch("pywhispr.app.AudioRecorder"),
+            patch("pywhispr.app.TrayIcon"),
+            patch("pywhispr.app.load_vocabulary", return_value=[]),
+            patch("pywhispr.app.create_hotkey_listener") as make_listener,
+        ):
+            instance = PyWhisprApp(
+                Config(
+                    play_sounds=False,
+                    api_enabled=False,
+                    offer_gpu_setup=False,
+                    history_hotkey="",
+                )
+            )
+        assert instance.history_listener is None
+        assert make_listener.call_count == 1  # the dictation hotkey only
+        instance._worker.shutdown(wait=True)

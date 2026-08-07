@@ -42,6 +42,7 @@ class TrayIcon(QSystemTrayIcon):
         on_change_hotkey=None,
         on_edit_vocabulary=None,
         on_enable_gpu=None,
+        on_show_history=None,
         parent=None,
     ):
         super().__init__(_make_icon(), parent)
@@ -57,6 +58,10 @@ class TrayIcon(QSystemTrayIcon):
             # Deliberately no `activated` handler: clicking the icon must only
             # open the menu. A stray click that silently starts recording is
             # worse than one that does nothing.
+        if on_show_history is not None:
+            history = QAction("Recent dictations…", menu)
+            history.triggered.connect(on_show_history)
+            menu.addAction(history)
         if on_change_hotkey is not None:
             change_hotkey = QAction("Change hotkey…", menu)
             change_hotkey.triggered.connect(on_change_hotkey)

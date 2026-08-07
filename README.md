@@ -64,6 +64,7 @@ this. (On Windows, double-tap works without any special permission.)
 | Key | Default | Meaning |
 |---|---|---|
 | `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
+| `history_hotkey` | `<cmd>+<shift>+h` / `<ctrl>+<alt>+h` | Opens the picker of the last few transcripts — see [Recent dictations](#recent-dictations-recall). `""` registers no hotkey |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
@@ -87,6 +88,22 @@ this. (On Windows, double-tap works without any special permission.)
 | `api_port` | `9149` | Listening port |
 | `api_max_audio_seconds` | `300` | Longest clip accepted per request |
 | `api_max_queue` | `4` | Requests in flight before new ones get `503 busy` |
+
+## Recent dictations (recall)
+
+Auto-paste goes wherever the keyboard focus is. Dictate at a text box that quietly
+lost focus and the transcript lands somewhere useless — and the audio is gone, so
+there is nothing to transcribe again.
+
+PyWhispr keeps the **last 3 transcripts in memory**. Press the recall hotkey
+(`Ctrl+Alt+H`, or `Cmd+Shift+H` on macOS) or use tray menu → **Recent dictations…**,
+pick one from the list, and it is pasted where the cursor is now. Return or a
+double-click chooses; Escape cancels. The picker takes the focus while it is open,
+so the window that had it is given it back before the paste goes out.
+
+The transcripts are **never written to disk** — they live in memory, capped at three,
+and go when the app does. Set `history_hotkey = ""` to register no hotkey (the tray
+menu entry stays).
 
 ## Continuation joining
 

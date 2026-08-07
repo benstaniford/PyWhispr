@@ -110,6 +110,39 @@ def _foreground_monitor_rect() -> QRect | None:
         return None
 
 
+def remember_foreground() -> int | None:
+    """Handle of the window with focus right now, for restore_foreground later.
+
+    Opening a dialog takes the focus off whatever the user was typing into, and
+    a paste goes wherever the focus is — so anything that shows a window and
+    then pastes has to put the focus back itself. None off Windows, where
+    closing the dialog is enough.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        return ctypes.windll.user32.GetForegroundWindow() or None
+    except Exception:
+        log.debug("Could not read the foreground window", exc_info=True)
+        return None
+
+
+def restore_foreground(handle: int | None) -> None:
+    """Give the focus back to the window remember_foreground() returned."""
+    if handle is None or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # Windows only grants this to the process that currently owns the
+        # foreground — which is us, having just closed our own dialog.
+        ctypes.windll.user32.SetForegroundWindow(handle)
+    except Exception:
+        log.debug("Could not restore the previous foreground window", exc_info=True)
+
+
 def _force_foreground(window: QWidget) -> None:
     """The Win32 half of the same request; Qt's is advisory here."""
     if sys.platform != "win32":
@@ -140,4 +173,10 @@ def _re_assert(window: QWidget) -> None:
         pass
 
 
-__all__ = ["centre_on_active_screen", "screen_for_foreground_window", "show_in_front"]
+__all__ = [
+    "centre_on_active_screen",
+    "remember_foreground",
+    "restore_foreground",
+    "screen_for_foreground_window",
+    "show_in_front",
+]

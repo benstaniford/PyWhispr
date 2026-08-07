@@ -76,6 +76,30 @@ word; `caret.py` finds `preceding`.
   `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
   `sys.modules` and made later tests pass for the wrong reason. Fake both.
 
+## Transcript recall (`history.py` + `ui/history_dialog.py`)
+
+Auto-paste follows the focus, so a dictation aimed at a box that had lost focus
+is lost outright — the audio is gone. The last `HISTORY_SIZE` (3) transcripts
+are kept **in memory only** and a second hotkey (`cfg.history_hotkey`) opens a
+picker that pastes the chosen one at the current caret.
+
+- What is remembered is the **corrected** transcript, *before* `join_text`: the
+  join belongs to the caret that dictation was aimed at, and re-pasting later
+  lands somewhere else entirely. `_context.invalidate()` for the same reason.
+- **The picker steals the focus it is about to paste into.** `remember_foreground()`
+  / `restore_foreground()` in `ui/foreground.py` put it back (Win32
+  `GetForegroundWindow`/`SetForegroundWindow`; no-ops elsewhere), then the paste
+  goes out one `FOCUS_RESTORE_MS` timer hop later — `SetForegroundWindow` only
+  works because *we* own the foreground at that moment, having just closed our
+  own dialog.
+- Both hotkeys are silenced around any modal dialog (`_resume_listeners`), so a
+  chord pressed inside one cannot start a recording or re-open the picker.
+- **Never log the transcripts** — lengths and counts only, like everything else
+  that touches the user's words.
+- Testing gotcha: the `app` fixture's `create_hotkey_listener` patch needs a
+  `side_effect` returning a fresh mock, or the dictation and recall listeners
+  are the *same* mock and every call count doubles.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing

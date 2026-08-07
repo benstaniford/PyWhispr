@@ -19,6 +19,7 @@ from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, save_config
 from pywhispr.ducking import create_ducker
 from pywhispr.filler import filler_words, is_deletion_only, remove_fillers
+from pywhispr.history import TranscriptHistory
 from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.join import join_text
@@ -35,6 +36,10 @@ log = logging.getLogger(__name__)
 # Holding a double-tap's second key at least this long makes it push-to-talk
 # (stop on release); a quicker double-tap latches recording instead.
 PUSH_TO_TALK_HOLD_SECONDS = 0.35
+
+# After the history picker closes, how long the previously focused window is
+# given to take the focus back before the paste keystroke goes out.
+FOCUS_RESTORE_MS = 150
 
 
 class State(Enum):
@@ -55,6 +60,7 @@ class PyWhisprApp(QObject):
 
     _hotkey_toggled = Signal()
     _hotkey_released = Signal(float)  # double-tap activating key released; held seconds
+    _history_requested = Signal()
     _mic_level = Signal(float)
     _model_ready = Signal()
     _model_failed = Signal(str)
@@ -75,6 +81,7 @@ class PyWhisprApp(QObject):
             on_change_hotkey=self._change_hotkey,
             on_edit_vocabulary=self._edit_vocabulary,
             on_enable_gpu=self._enable_gpu,
+            on_show_history=self._history_requested.emit,
         )
         self._progress_window = None  # kept alive while anything is downloading
         self._load_model = None  # set by start(), possibly deferred behind GPU setup
@@ -89,12 +96,20 @@ class PyWhisprApp(QObject):
             max_chars=cfg.context_chars, memory_seconds=cfg.context_memory_seconds
         )
         self._last_inserted: str | None = None
+        # The last few transcripts, so one that auto-pasted into the wrong window
+        # can still be recovered. In memory only — see history.py.
+        self._history = TranscriptHistory()
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
         self.ducker = create_ducker(cfg)
         self.listener = create_hotkey_listener(
             cfg.hotkey,
             on_toggle=self._hotkey_toggled.emit,
             on_release=self._hotkey_released.emit,
+        )
+        self.history_listener = (
+            create_hotkey_listener(cfg.history_hotkey, on_toggle=self._history_requested.emit)
+            if cfg.history_hotkey
+            else None
         )
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
         self._model_error: str | None = None
@@ -129,6 +144,7 @@ class PyWhisprApp(QObject):
 
         self._hotkey_toggled.connect(self._on_activate)
         self._hotkey_released.connect(self._on_activation_key_released)
+        self._history_requested.connect(self._show_history)
         self._mic_level.connect(self.overlay.on_level)
         self._model_ready.connect(self._on_model_ready)
         self._model_failed.connect(self._on_model_failed)
@@ -170,6 +186,14 @@ class PyWhisprApp(QObject):
                 "Hotkey not registered",
                 f"Could not register {self.cfg.hotkey!r}: {exc}. "
                 "Use the tray menu to pick a different one.",
+            )
+        if not self._start_history_listener():
+            # Not worth an error state: dictation works, and the picker is still
+            # on the tray menu.
+            self.tray.notify(
+                "Recall hotkey not registered",
+                f"Could not register {self.cfg.history_hotkey!r}. Recent dictations are "
+                "still on the tray menu.",
             )
         self._check_double_tap_permission(self.cfg.hotkey)
 
@@ -394,9 +418,25 @@ class PyWhisprApp(QObject):
         if self._progress_window is not None:
             self._progress_window.finish_model(message)
 
+    def _start_history_listener(self) -> bool:
+        """Register the recall hotkey. False if it could not be claimed."""
+        if self.history_listener is None:
+            return True
+        try:
+            self.history_listener.start()
+            return True
+        except Exception:
+            log.exception("Could not register recall hotkey %r", self.cfg.history_hotkey)
+            return False
+
+    def _stop_history_listener(self) -> None:
+        if self.history_listener is not None:
+            self.history_listener.stop()
+
     def _quit(self) -> None:
         log.info("Quitting")
         self.listener.stop()
+        self._stop_history_listener()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
         try:
@@ -624,7 +664,12 @@ class PyWhisprApp(QObject):
         self.overlay.hide_overlay()
         # Vocabulary next: it can change the opening word, which is the word
         # the join then decides about.
-        self._last_inserted = self._joined(self._corrected(text))
+        corrected = self._corrected(text)
+        # Remembered before the join, and whatever the insertion does next: the
+        # join belongs to the caret this transcript was aimed at, and a paste
+        # that went to the wrong window is exactly what the history is for.
+        self._history.remember(corrected)
+        self._last_inserted = self._joined(corrected)
         self.injector.insert(self._last_inserted)
 
     def _cleaned(self, text: str) -> str:
@@ -728,6 +773,59 @@ class PyWhisprApp(QObject):
         self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
 
+    # -- history recall ------------------------------------------------------
+
+    def _show_history(self) -> None:
+        """Offer the last few transcripts and paste the chosen one at the caret.
+
+        The recovery for a dictation that auto-pasted into a window without the
+        focus the user thought it had: the audio is gone, but the text is still
+        here. The picker itself takes the focus away from the field the text is
+        meant for, so the window that had it is remembered and given it back
+        before the paste keystroke goes out.
+        """
+        if self.state != State.IDLE:
+            log.debug("Recall ignored: still %s", self.state.name)
+            return
+        items = list(self._history)
+        if not items:
+            self.tray.notify("Nothing to recall", "No dictations in this session yet.")
+            return
+
+        from pywhispr.ui.foreground import remember_foreground, restore_foreground
+        from pywhispr.ui.history_dialog import HistoryDialog
+
+        target = remember_foreground()
+        # The picker has the focus, so dictating into it helps nobody.
+        self.listener.stop()
+        self._stop_history_listener()
+        try:
+            chosen = HistoryDialog.choose(items)
+        finally:
+            self._resume_listeners()
+        if chosen is None:
+            return
+
+        restore_foreground(target)
+        # Whatever the caret sits after now is not something we put there.
+        self._context.invalidate()
+        self._set_state(State.INSERTING)
+        self._last_inserted = chosen
+        log.info("Re-inserting a remembered transcript (%d characters)", len(chosen))
+        QTimer.singleShot(FOCUS_RESTORE_MS, lambda: self.injector.insert(chosen))
+
+    def _resume_listeners(self) -> None:
+        """Re-arm both hotkeys after a dialog that had to silence them.
+
+        Never raises: losing a dialog's result is annoying, losing the tray app
+        is worse.
+        """
+        try:
+            self.listener.start()
+        except Exception:
+            log.exception("Could not restart the hotkey listener")
+        self._start_history_listener()
+
     def _change_hotkey(self) -> None:
         """Tray menu: capture a new chord, save it, and re-register the listener."""
         if self.state not in (State.IDLE, State.LOADING):
@@ -738,8 +836,9 @@ class PyWhisprApp(QObject):
         # longer behind the caret.
         self._context.invalidate()
         # Stop listening while the dialog is up so pressing the current chord
-        # inside it doesn't start a recording.
+        # inside it doesn't start a recording — or open the history picker.
         self.listener.stop()
+        self._stop_history_listener()
         new_chord = HotkeyCaptureDialog.capture(self.cfg.hotkey)
 
         if new_chord and new_chord != self.cfg.hotkey:
@@ -762,6 +861,7 @@ class PyWhisprApp(QObject):
                 self.listener.start()
         else:
             self.listener.start()
+        self._start_history_listener()
 
         if self.state != State.LOADING:
             self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
@@ -782,6 +882,7 @@ class PyWhisprApp(QObject):
         # behind the caret; and a dictation pasted into the editor helps nobody.
         self._context.invalidate()
         self.listener.stop()
+        self._stop_history_listener()
         try:
             edited = VocabularyDialog.edit(load_vocabulary_text() or TEMPLATE)
             if edited is not None:
@@ -793,10 +894,7 @@ class PyWhisprApp(QObject):
             log.exception("Could not save the vocabulary")
             self.tray.notify("Vocabulary not saved", str(exc))
         finally:
-            try:
-                self.listener.start()
-            except Exception:
-                log.exception("Could not restart the hotkey listener after editing vocabulary")
+            self._resume_listeners()
 
     def _check_double_tap_permission(self, chord: str) -> None:
         """Double-tap hotkeys need Input Monitoring on macOS; guide the user."""
