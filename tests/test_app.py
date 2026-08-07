@@ -797,7 +797,8 @@ class TestHistoryRecall:
         choose.assert_not_called()
         assert app.state == State.RECORDING
 
-    def test_no_recall_hotkey_when_unconfigured(self, qtbot, qapp):
+    def test_recall_claims_no_hotkey_of_its_own(self, qtbot, qapp):
+        """The picker is a tray menu item; only dictation registers a hotkey."""
         from pywhispr.app import PyWhisprApp
         from pywhispr.config import Config
 
@@ -809,13 +810,7 @@ class TestHistoryRecall:
             patch("pywhispr.app.create_hotkey_listener") as make_listener,
         ):
             instance = PyWhisprApp(
-                Config(
-                    play_sounds=False,
-                    api_enabled=False,
-                    offer_gpu_setup=False,
-                    history_hotkey="",
-                )
+                Config(play_sounds=False, api_enabled=False, offer_gpu_setup=False)
             )
-        assert instance.history_listener is None
         assert make_listener.call_count == 1  # the dictation hotkey only
         instance._worker.shutdown(wait=True)

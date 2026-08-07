@@ -64,7 +64,6 @@ this. (On Windows, double-tap works without any special permission.)
 | Key | Default | Meaning |
 |---|---|---|
 | `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
-| `history_hotkey` | `<cmd>+<shift>+h` / `<ctrl>+<alt>+h` | Opens the picker of the last few transcripts — see [Recent dictations](#recent-dictations-recall). `""` registers no hotkey |
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
@@ -95,15 +94,18 @@ Auto-paste goes wherever the keyboard focus is. Dictate at a text box that quiet
 lost focus and the transcript lands somewhere useless — and the audio is gone, so
 there is nothing to transcribe again.
 
-PyWhispr keeps the **last 3 transcripts in memory**. Press the recall hotkey
-(`Ctrl+Alt+H`, or `Cmd+Shift+H` on macOS) or use tray menu → **Recent dictations…**,
-pick one from the list, and it is pasted where the cursor is now. Return or a
-double-click chooses; Escape cancels. The picker takes the focus while it is open,
-so the window that had it is given it back before the paste goes out.
+PyWhispr keeps the **last 3 transcripts in memory**. Use tray menu → **Recent
+dictations…**, pick one from the list, and **Paste** puts it where the cursor is
+now. Return or a double-click chooses; Escape or the **✕** closes. Each row also
+has a **copy button** that puts that transcript on the clipboard and leaves the
+picker open. The picker takes the focus while it is open, so the window that had
+it is given it back before the paste goes out.
+
+There is no recall hotkey — the tray menu is the only way in, so the feature costs
+no keyboard shortcut.
 
 The transcripts are **never written to disk** — they live in memory, capped at three,
-and go when the app does. Set `history_hotkey = ""` to register no hotkey (the tray
-menu entry stays).
+and go when the app does.
 
 ## Continuation joining
 

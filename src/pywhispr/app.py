@@ -106,11 +106,6 @@ class PyWhisprApp(QObject):
             on_toggle=self._hotkey_toggled.emit,
             on_release=self._hotkey_released.emit,
         )
-        self.history_listener = (
-            create_hotkey_listener(cfg.history_hotkey, on_toggle=self._history_requested.emit)
-            if cfg.history_hotkey
-            else None
-        )
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
         self._model_error: str | None = None
 
@@ -186,14 +181,6 @@ class PyWhisprApp(QObject):
                 "Hotkey not registered",
                 f"Could not register {self.cfg.hotkey!r}: {exc}. "
                 "Use the tray menu to pick a different one.",
-            )
-        if not self._start_history_listener():
-            # Not worth an error state: dictation works, and the picker is still
-            # on the tray menu.
-            self.tray.notify(
-                "Recall hotkey not registered",
-                f"Could not register {self.cfg.history_hotkey!r}. Recent dictations are "
-                "still on the tray menu.",
             )
         self._check_double_tap_permission(self.cfg.hotkey)
 
@@ -418,25 +405,9 @@ class PyWhisprApp(QObject):
         if self._progress_window is not None:
             self._progress_window.finish_model(message)
 
-    def _start_history_listener(self) -> bool:
-        """Register the recall hotkey. False if it could not be claimed."""
-        if self.history_listener is None:
-            return True
-        try:
-            self.history_listener.start()
-            return True
-        except Exception:
-            log.exception("Could not register recall hotkey %r", self.cfg.history_hotkey)
-            return False
-
-    def _stop_history_listener(self) -> None:
-        if self.history_listener is not None:
-            self.history_listener.stop()
-
     def _quit(self) -> None:
         log.info("Quitting")
         self.listener.stop()
-        self._stop_history_listener()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
         try:
@@ -798,7 +769,6 @@ class PyWhisprApp(QObject):
         target = remember_foreground()
         # The picker has the focus, so dictating into it helps nobody.
         self.listener.stop()
-        self._stop_history_listener()
         try:
             chosen = HistoryDialog.choose(items)
         finally:
@@ -815,7 +785,7 @@ class PyWhisprApp(QObject):
         QTimer.singleShot(FOCUS_RESTORE_MS, lambda: self.injector.insert(chosen))
 
     def _resume_listeners(self) -> None:
-        """Re-arm both hotkeys after a dialog that had to silence them.
+        """Re-arm the hotkey after a dialog that had to silence it.
 
         Never raises: losing a dialog's result is annoying, losing the tray app
         is worse.
@@ -824,7 +794,6 @@ class PyWhisprApp(QObject):
             self.listener.start()
         except Exception:
             log.exception("Could not restart the hotkey listener")
-        self._start_history_listener()
 
     def _change_hotkey(self) -> None:
         """Tray menu: capture a new chord, save it, and re-register the listener."""
@@ -836,9 +805,8 @@ class PyWhisprApp(QObject):
         # longer behind the caret.
         self._context.invalidate()
         # Stop listening while the dialog is up so pressing the current chord
-        # inside it doesn't start a recording — or open the history picker.
+        # inside it doesn't start a recording.
         self.listener.stop()
-        self._stop_history_listener()
         new_chord = HotkeyCaptureDialog.capture(self.cfg.hotkey)
 
         if new_chord and new_chord != self.cfg.hotkey:
@@ -861,7 +829,6 @@ class PyWhisprApp(QObject):
                 self.listener.start()
         else:
             self.listener.start()
-        self._start_history_listener()
 
         if self.state != State.LOADING:
             self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
@@ -882,7 +849,6 @@ class PyWhisprApp(QObject):
         # behind the caret; and a dictation pasted into the editor helps nobody.
         self._context.invalidate()
         self.listener.stop()
-        self._stop_history_listener()
         try:
             edited = VocabularyDialog.edit(load_vocabulary_text() or TEMPLATE)
             if edited is not None:

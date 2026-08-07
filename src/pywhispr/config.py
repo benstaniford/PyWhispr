@@ -19,27 +19,13 @@ APP_NAME = "PyWhispr"
 DEFAULT_HOTKEY_MAC = "<cmd>+<shift>+<space>"
 DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
 
-DEFAULT_HISTORY_HOTKEY_MAC = "<cmd>+<shift>+h"
-DEFAULT_HISTORY_HOTKEY_OTHER = "<ctrl>+<alt>+h"
-
-
 def default_hotkey() -> str:
     return DEFAULT_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_HOTKEY_OTHER
-
-
-def default_history_hotkey() -> str:
-    return (
-        DEFAULT_HISTORY_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_HISTORY_HOTKEY_OTHER
-    )
 
 
 @dataclass
 class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
-    # Opens the picker of the last few transcripts, so a dictation that
-    # auto-pasted into the wrong window can be pasted into the right one. Set
-    # to "" to register no second hotkey (the tray menu still has it).
-    history_hotkey: str = dataclasses.field(default_factory=default_history_hotkey)
     input_device: int | None = None  # None = system default microphone
     model_override: str | None = None  # HuggingFace repo id; None = platform default
     # ONNX (Windows/Linux) only. None (the default) chooses: "int8" when the model

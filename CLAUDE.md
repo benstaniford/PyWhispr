@@ -80,8 +80,10 @@ word; `caret.py` finds `preceding`.
 
 Auto-paste follows the focus, so a dictation aimed at a box that had lost focus
 is lost outright — the audio is gone. The last `HISTORY_SIZE` (3) transcripts
-are kept **in memory only** and a second hotkey (`cfg.history_hotkey`) opens a
-picker that pastes the chosen one at the current caret.
+are kept **in memory only** and a tray menu entry opens a picker that pastes the
+chosen one at the current caret. **No hotkey of its own** — a second global
+shortcut is a real cost (it can clash, it needs registering, it needs a config
+key and a failure path) for something reached once in a while.
 
 - What is remembered is the **corrected** transcript, *before* `join_text`: the
   join belongs to the caret that dictation was aimed at, and re-pasting later
@@ -92,13 +94,15 @@ picker that pastes the chosen one at the current caret.
   goes out one `FOCUS_RESTORE_MS` timer hop later — `SetForegroundWindow` only
   works because *we* own the foreground at that moment, having just closed our
   own dialog.
-- Both hotkeys are silenced around any modal dialog (`_resume_listeners`), so a
-  chord pressed inside one cannot start a recording or re-open the picker.
+- Per-row copy buttons, not one global one: the row is what identifies the
+  transcript, so the button belongs on it. Copying leaves the picker open —
+  pasting closes it, copying does not.
+- The dictation hotkey is silenced around any modal dialog (`_resume_listeners`),
+  so the chord pressed inside one cannot start a recording.
 - **Never log the transcripts** — lengths and counts only, like everything else
   that touches the user's words.
-- Testing gotcha: the `app` fixture's `create_hotkey_listener` patch needs a
-  `side_effect` returning a fresh mock, or the dictation and recall listeners
-  are the *same* mock and every call count doubles.
+- Testing gotcha: rows are `setItemWidget` widgets, so `item.text()` is empty —
+  assert on the row's `QLabel`, not the item.
 
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
