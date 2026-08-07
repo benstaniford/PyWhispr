@@ -94,9 +94,9 @@ Auto-paste goes wherever the keyboard focus is. Dictate at a text box that quiet
 lost focus and the transcript lands somewhere useless — and the audio is gone, so
 there is nothing to transcribe again.
 
-PyWhispr keeps the **last 3 transcripts in memory**. Use tray menu → **Recent
+PyWhispr keeps the **last 10 transcripts in memory**. Use tray menu → **Recent
 dictations…**, pick one from the list, and **Paste** puts it where the cursor is
-now. Return or a double-click chooses; Escape or the **✕** closes. Each row also
+now. The picker is as tall as it has entries and scrolls past six. Return or a double-click chooses; Escape or the **✕** closes. Each row also
 has a **copy button** that puts that transcript on the clipboard and leaves the
 picker open. The picker takes the focus while it is open, so the window that had
 it is given it back before the paste goes out.
@@ -104,7 +104,7 @@ it is given it back before the paste goes out.
 There is no recall hotkey — the tray menu is the only way in, so the feature costs
 no keyboard shortcut.
 
-The transcripts are **never written to disk** — they live in memory, capped at three,
+The transcripts are **never written to disk** — they live in memory, capped at ten,
 and go when the app does.
 
 ## Continuation joining

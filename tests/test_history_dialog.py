@@ -1,7 +1,7 @@
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QLabel, QToolButton
 
-from pywhispr.ui.history_dialog import HistoryDialog
+from pywhispr.ui.history_dialog import COPIED_FEEDBACK_MS, MAX_VISIBLE_ROWS, HistoryDialog
 
 
 def row_label(dialog: HistoryDialog, index: int) -> str:
@@ -63,6 +63,53 @@ def test_copying_does_not_close_the_dialog(qtbot):
     copy_button(dialog, 0).click()
 
     assert dialog.isVisible()
+
+
+def test_copy_button_stays_visible_at_minimum_width(qtbot):
+    """A long preview must give way to the button, not push it off the row."""
+    dialog = HistoryDialog(["a transcript far too long to fit on one row " * 3])
+    qtbot.addWidget(dialog)
+    dialog.resize(dialog.minimumWidth(), dialog.height())
+    dialog.show()
+    qtbot.waitExposed(dialog)
+
+    row = dialog._list.itemWidget(dialog._list.item(0))
+    button = copy_button(dialog, 0)
+    assert button.width() > 0
+    assert button.geometry().right() <= row.width()
+
+
+def test_short_history_makes_a_short_dialog(qtbot):
+    one = HistoryDialog(["only one"])
+    qtbot.addWidget(one)
+    several = HistoryDialog([f"line {i}" for i in range(MAX_VISIBLE_ROWS)])
+    qtbot.addWidget(several)
+
+    # Sized to the content, so one entry does not sit above a column of nothing.
+    assert one._list.height() < several._list.height()
+
+
+def test_more_than_the_visible_rows_scrolls_instead_of_growing(qtbot):
+    full = HistoryDialog([f"line {i}" for i in range(MAX_VISIBLE_ROWS)])
+    qtbot.addWidget(full)
+    overflowing = HistoryDialog([f"line {i}" for i in range(MAX_VISIBLE_ROWS + 4)])
+    qtbot.addWidget(overflowing)
+
+    assert overflowing._list.count() == MAX_VISIBLE_ROWS + 4
+    assert overflowing._list.height() == full._list.height()
+
+    overflowing.show()  # the scroll range is only real once it is laid out
+    qtbot.waitExposed(overflowing)
+    assert overflowing._list.verticalScrollBar().maximum() > 0
+
+
+def test_closing_before_the_copy_feedback_expires_is_survivable(qtbot):
+    """The feedback timer must not outlive the button it resets."""
+    dialog = HistoryDialog(["newest"])
+    copy_button(dialog, 0).click()
+
+    dialog.deleteLater()
+    qtbot.wait(COPIED_FEEDBACK_MS + 200)  # would segfault on a deleted widget
 
 
 def test_close_button_rejects(qtbot):

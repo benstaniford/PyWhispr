@@ -14,10 +14,11 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterator
 
-# How many transcripts to keep. Small on purpose: this is the "that went to the
-# wrong window" undo, not a notes app, and every entry is one more line of the
-# user's speech sitting in memory.
-HISTORY_SIZE = 3
+# How many transcripts to keep. Bounded on purpose: this is the "that went to
+# the wrong window" undo, not a notes app, and every entry is one more line of
+# the user's speech sitting in memory. Ten covers noticing several dictations
+# later; the picker scrolls rather than growing past MAX_VISIBLE_ROWS.
+HISTORY_SIZE = 10
 
 PREVIEW_CHARS = 72
 
