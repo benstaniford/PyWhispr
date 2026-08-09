@@ -25,6 +25,7 @@ from pywhispr.injector import TextInjector
 from pywhispr.join import join_text
 from pywhispr.logging_setup import log_environment, log_path
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
+from pywhispr.scratch import compile_reset_phrases, is_suffix_of, strip_before_reset
 from pywhispr.stt import create_backend
 from pywhispr.stt.base import SAMPLE_RATE
 from pywhispr.tray import TrayIcon
@@ -40,6 +41,9 @@ PUSH_TO_TALK_HOLD_SECONDS = 0.35
 # After the history picker closes, how long the previously focused window is
 # given to take the focus back before the paste keystroke goes out.
 FOCUS_RESTORE_MS = 150
+
+# How long "Starting over…" replaces the waveform after the reset hotkey.
+RESET_FEEDBACK_MS = 700
 
 
 class State(Enum):
@@ -60,6 +64,7 @@ class PyWhisprApp(QObject):
 
     _hotkey_toggled = Signal()
     _hotkey_released = Signal(float)  # double-tap activating key released; held seconds
+    _reset_requested = Signal()
     _history_requested = Signal()
     _mic_level = Signal(float)
     _model_ready = Signal()
@@ -91,6 +96,7 @@ class PyWhisprApp(QObject):
         # request threads can read it without a lock.
         self._vocab: list[Rule] = load_vocabulary()
         self._fillers = filler_words(cfg.extra_filler_words, cfg.keep_filler_words)
+        self._reset_phrases = compile_reset_phrases(cfg.voice_reset_phrases)
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
         self._context = ContextTracker(
             max_chars=cfg.context_chars, memory_seconds=cfg.context_memory_seconds
@@ -105,6 +111,14 @@ class PyWhisprApp(QObject):
             cfg.hotkey,
             on_toggle=self._hotkey_toggled.emit,
             on_release=self._hotkey_released.emit,
+        )
+        # Its own listener, and one that is never stopped around a dialog the way
+        # the dictation one is: pressing it does nothing outside RECORDING, and
+        # no dialog can be open while a recording is running.
+        self.reset_listener = (
+            create_hotkey_listener(cfg.reset_hotkey, on_toggle=self._reset_requested.emit)
+            if cfg.reset_hotkey and cfg.reset_hotkey != cfg.hotkey
+            else None
         )
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
         self._model_error: str | None = None
@@ -139,6 +153,7 @@ class PyWhisprApp(QObject):
 
         self._hotkey_toggled.connect(self._on_activate)
         self._hotkey_released.connect(self._on_activation_key_released)
+        self._reset_requested.connect(self._on_reset)
         self._history_requested.connect(self._show_history)
         self._mic_level.connect(self.overlay.on_level)
         self._model_ready.connect(self._on_model_ready)
@@ -183,6 +198,14 @@ class PyWhisprApp(QObject):
                 "Use the tray menu to pick a different one.",
             )
         self._check_double_tap_permission(self.cfg.hotkey)
+        if self.reset_listener is not None:
+            try:
+                self.reset_listener.start()
+                log.info("Reset hotkey listening on %s", self.cfg.reset_hotkey)
+            except Exception as exc:
+                # Not even worth a notification: dictation itself still works.
+                log.warning("Could not register reset hotkey %r: %s", self.cfg.reset_hotkey, exc)
+                self.reset_listener = None
 
         def load():
             started = time.monotonic()
@@ -408,6 +431,8 @@ class PyWhisprApp(QObject):
     def _quit(self) -> None:
         log.info("Quitting")
         self.listener.stop()
+        if self.reset_listener is not None:
+            self.reset_listener.stop()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
         try:
@@ -460,7 +485,7 @@ class PyWhisprApp(QObject):
         text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
-        return self._corrected(self._cleaned(text))
+        return self._corrected(self._cleaned(self._after_reset(text)))
 
     # -- state transitions (main thread only) --------------------------------
 
@@ -618,14 +643,40 @@ class PyWhisprApp(QObject):
 
         self._worker.submit(transcribe)
 
+    def _on_reset(self) -> None:
+        """Reset hotkey: drop the audio so far and carry on recording.
+
+        Ignored outside RECORDING — there is no half-said sentence to throw away
+        in any other state, and a failing reset must not end the recording, since
+        that would insert the very words the user asked to be rid of.
+        """
+        if self.state != State.RECORDING:
+            log.debug("Reset ignored: %s", self.state.name)
+            return
+        try:
+            self.recorder.reset()
+        except Exception:
+            log.exception("Could not reset the recording")
+            return
+        self._max_duration_timer.start()  # the clock starts again with the audio
+        self._play(self._start_sound)
+        self.overlay.show_status("Starting over…")
+        self.tray.set_status("Recording… (started over)", active=True)
+        QTimer.singleShot(RESET_FEEDBACK_MS, self._back_to_recording_overlay)
+
+    def _back_to_recording_overlay(self) -> None:
+        if self.state == State.RECORDING:
+            self.overlay.show_recording()
+
     def _on_max_duration(self) -> None:
         if self.state == State.RECORDING:
             log.info("Max recording duration reached, stopping")
             self._stop_recording()
 
     def _on_transcribed(self, text: str) -> None:
-        # Before the empty check: a recording of nothing but "um" leaves nothing.
-        text = self._cleaned(text)
+        # Before the empty check: a recording of nothing but "um" leaves nothing,
+        # and so does one the user talked themselves out of.
+        text = self._cleaned(self._after_reset(text))
         if not text.strip():
             log.info("Empty transcription, nothing to insert")
             self._finish_cycle()
@@ -642,6 +693,30 @@ class PyWhisprApp(QObject):
         self._history.remember(corrected)
         self._last_inserted = self._joined(corrected)
         self.injector.insert(self._last_inserted)
+
+    def _after_reset(self, text: str) -> str:
+        """Honour a spoken "scratch that", degrading to the raw transcript.
+
+        First of the passes, so everything after it works on the words the user
+        actually meant to keep. Wrapped like the others — the audio is gone — and
+        the tripwire is this pass's own contract: a suffix of what came in.
+        """
+        if not text or self._reset_phrases is None:
+            return text
+        try:
+            kept = strip_before_reset(text, self._reset_phrases)
+        except Exception:
+            log.exception("Voice reset failed; using the raw transcript")
+            return text
+        if not is_suffix_of(text, kept):
+            log.error(
+                "Voice reset produced %d characters that are not a tail of %d; "
+                "using the raw transcript",
+                len(kept),
+                len(text),
+            )
+            return text
+        return kept
 
     def _cleaned(self, text: str) -> str:
         """Take the hesitations out, degrading to the raw transcript on any doubt.

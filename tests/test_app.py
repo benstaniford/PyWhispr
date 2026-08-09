@@ -5,6 +5,7 @@ import pytest
 
 from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
+from pywhispr.scratch import compile_reset_phrases
 from pywhispr.vocab import parse_vocabulary
 
 
@@ -812,5 +813,78 @@ class TestHistoryRecall:
             instance = PyWhisprApp(
                 Config(play_sounds=False, api_enabled=False, offer_gpu_setup=False)
             )
-        assert make_listener.call_count == 1  # the dictation hotkey only
+        chords = [call.args[0] for call in make_listener.call_args_list]
+        # Dictation and reset register; the picker is a tray menu item.
+        assert chords == [Config().hotkey, Config().reset_hotkey]
         instance._worker.shutdown(wait=True)
+
+
+class TestResetHotkey:
+    def _recording(self, app):
+        app._on_model_ready()
+        app._on_toggle()
+        assert app.state == State.RECORDING
+
+    def test_drops_the_audio_and_keeps_recording(self, app):
+        self._recording(app)
+        app._on_reset()
+        app._test_recorder.reset.assert_called_once_with()
+        assert app.state == State.RECORDING
+        app._test_recorder.stop.assert_not_called()
+
+    def test_ignored_when_not_recording(self, app):
+        app._on_model_ready()
+        assert app.state == State.IDLE
+        app._on_reset()
+        app._test_recorder.reset.assert_not_called()
+        assert app.state == State.IDLE
+
+    def test_a_failing_reset_leaves_the_recording_alone(self, app):
+        self._recording(app)
+        app._test_recorder.reset.side_effect = RuntimeError("boom")
+        app._on_reset()
+        assert app.state == State.RECORDING
+
+    def test_no_listener_when_unset_or_clashing(self, qtbot, qapp):
+        from pywhispr.app import PyWhisprApp
+
+        for reset_hotkey in ("", Config().hotkey):
+            with (
+                patch("pywhispr.app.create_backend"),
+                patch("pywhispr.app.AudioRecorder"),
+                patch("pywhispr.app.TrayIcon"),
+                patch("pywhispr.app.load_vocabulary", return_value=[]),
+                patch("pywhispr.app.create_hotkey_listener"),
+            ):
+                instance = PyWhisprApp(
+                    Config(
+                        play_sounds=False,
+                        api_enabled=False,
+                        offer_gpu_setup=False,
+                        reset_hotkey=reset_hotkey,
+                    )
+                )
+            assert instance.reset_listener is None
+            instance._worker.shutdown(wait=True)
+
+
+class TestVoiceReset:
+    def test_only_the_tail_is_inserted(self, app, qtbot):
+        app._on_model_ready()
+        with patch.object(app.injector, "insert") as insert:
+            app._on_transcribed("Book the room. Clear clear, book the hall.")
+        insert.assert_called_once_with("Book the hall.")
+        assert list(app._history) == ["Book the hall."]  # not the discarded half
+
+    def test_the_words_used_as_words_are_left_alone(self, app):
+        app._on_model_ready()
+        with patch.object(app.injector, "insert") as insert:
+            app._on_transcribed("Please clear that surface.")
+        insert.assert_called_once_with("Please clear that surface.")
+
+    def test_no_phrases_configured_inserts_verbatim(self, app):
+        app._on_model_ready()
+        app._reset_phrases = compile_reset_phrases([])
+        with patch.object(app.injector, "insert") as insert:
+            app._on_transcribed("Book the room. Clear clear. Book the hall.")
+        insert.assert_called_once_with("Book the room. Clear clear. Book the hall.")

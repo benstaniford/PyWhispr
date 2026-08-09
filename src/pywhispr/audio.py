@@ -75,6 +75,19 @@ class AudioRecorder:
         self._stream.start()
         log.debug("Recording started (device=%s)", self._device)
 
+    def reset(self) -> None:
+        """Throw away what has been captured and keep the stream open.
+
+        Rebinding the list rather than clearing it: the PortAudio callback thread
+        may be appending at this very moment, and a block that lands in the old
+        list is exactly what the user asked to lose.
+        """
+        if self._stream is None:
+            raise RuntimeError("Not recording")
+        dropped = len(self._blocks)
+        self._blocks = []
+        log.debug("Recording reset: %d block(s) dropped", dropped)
+
     def stop(self) -> np.ndarray:
         if self._stream is None:
             raise RuntimeError("Not recording")

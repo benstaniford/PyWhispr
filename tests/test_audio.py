@@ -1,6 +1,9 @@
-import numpy as np
+from unittest.mock import MagicMock
 
-from pywhispr.audio import rms_level
+import numpy as np
+import pytest
+
+from pywhispr.audio import AudioRecorder, rms_level
 
 
 def test_silence_is_zero():
@@ -18,6 +21,29 @@ def test_quiet_speech_level_is_mid_range():
     sine = (0.05 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)
     level = rms_level(sine)
     assert 0.2 < level < 0.8
+
+
+class TestReset:
+    """No PortAudio here: the stream object is only started, stopped and closed."""
+
+    def _recording(self) -> AudioRecorder:
+        recorder = AudioRecorder()
+        recorder._stream = MagicMock()
+        recorder._blocks = [np.ones(1600, dtype=np.float32)]
+        return recorder
+
+    def test_drops_the_buffer_and_keeps_recording(self):
+        recorder = self._recording()
+        recorder.reset()
+        assert recorder.recording  # still streaming
+        recorder._blocks.append(np.full(800, 0.5, dtype=np.float32))  # said afterwards
+        audio = recorder.stop()
+        assert len(audio) == 800  # only what came after the reset
+        assert np.allclose(audio, 0.5)
+
+    def test_reset_when_not_recording_raises(self):
+        with pytest.raises(RuntimeError):
+            AudioRecorder().reset()
 
 
 def test_level_is_monotonic_in_amplitude():

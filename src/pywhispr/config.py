@@ -19,13 +19,25 @@ APP_NAME = "PyWhispr"
 DEFAULT_HOTKEY_MAC = "<cmd>+<shift>+<space>"
 DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
 
+# Same chord as dictation but with Backspace: "erase what I have said so far".
+DEFAULT_RESET_HOTKEY_MAC = "<cmd>+<shift>+<backspace>"
+DEFAULT_RESET_HOTKEY_OTHER = "<ctrl>+<alt>+<backspace>"
+
+
 def default_hotkey() -> str:
     return DEFAULT_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_HOTKEY_OTHER
+
+
+def default_reset_hotkey() -> str:
+    return DEFAULT_RESET_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_RESET_HOTKEY_OTHER
 
 
 @dataclass
 class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
+    # Pressed mid-recording: drop what has been said so far and keep recording,
+    # for when the sentence came out wrong. "" turns it off.
+    reset_hotkey: str = dataclasses.field(default_factory=default_reset_hotkey)
     input_device: int | None = None  # None = system default microphone
     model_override: str | None = None  # HuggingFace repo id; None = platform default
     # ONNX (Windows/Linux) only. None (the default) chooses: "int8" when the model
@@ -71,6 +83,13 @@ class Config:
     remove_fillers: bool = True
     extra_filler_words: list[str] = dataclasses.field(default_factory=list)
     keep_filler_words: list[str] = dataclasses.field(default_factory=list)
+    # Spoken restart: say one of these and only what follows the last of them is
+    # kept. Doubled by default because a repeated word is easy to say deliberately
+    # and all but absent from natural speech, and only ever matched as a segment
+    # of its own — so "I can scratch that surface" is safe. Add your own
+    # ("scratch scratch", "reset reset", or a single invented marker); empty
+    # turns it off. See scratch.py.
+    voice_reset_phrases: list[str] = dataclasses.field(default_factory=lambda: ["clear clear"])
     # Custom vocabulary: correct the transcript's spelling of terms listed in
     # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.
