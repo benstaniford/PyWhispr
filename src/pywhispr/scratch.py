@@ -1,4 +1,4 @@
-"""Spoken restart: "scratch scratch" and what it throws away.
+"""Spoken restart: "clear clear" and what it throws away.
 
 Transcription only happens once the recording has stopped, so there is no way to
 notice the phrase while the user is still talking — the reset *hotkey* is the
@@ -15,15 +15,16 @@ The whole difficulty is telling the command from the same words used as words:
 "I can scratch that surface" must survive intact. Two structural guards, no
 heuristics:
 
-- **The default phrases are doubled** — "scratch scratch", "reset reset".
-  Immediate repetition of a word is close to absent from natural speech and
-  trivial to say on purpose, so the command has a shape ordinary dictation does
-  not accidentally take.
+- **The default phrase is doubled** — "clear clear" (and "scratch scratch" or
+  "reset reset" read the same way for anyone who prefers them). Immediate
+  repetition of a word is close to absent from natural speech and trivial to say
+  on purpose, so the command has a shape ordinary dictation does not
+  accidentally take.
 - **A phrase only counts as its own segment.** Whisper punctuates, so the
-  command lands as "Scratch scratch." or "…, scratch scratch, …" while the
-  innocent use sits inside a clause with words either side. Anything with a word
-  glued to it is not a command. This applies to whatever the user configures, so
-  a single-word marker of their own is safe too.
+  command lands as "Clear clear." or "…, clear clear, …" while the innocent use
+  sits inside a clause with words either side. Anything with a word glued to it
+  is not a command. This applies to whatever the user configures, so a
+  single-word marker of their own is safe too.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ def compile_reset_phrases(phrases: list[str]) -> re.Pattern[str] | None:
     if not parts:
         return None
     # The leading \s* sits after the lookbehind so the match may start on the
-    # space following the punctuation ("Yes. Scratch scratch.").
+    # space following the punctuation ("Yes. Clear clear.").
     return re.compile(
         rf"(?:^|(?<={_BOUNDARY}))\s*\b(?:{'|'.join(parts)})\b\s*(?:{_BOUNDARY}|$)",
         re.IGNORECASE,

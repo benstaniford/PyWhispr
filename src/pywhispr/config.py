@@ -86,11 +86,10 @@ class Config:
     # Spoken restart: say one of these and only what follows the last of them is
     # kept. Doubled by default because a repeated word is easy to say deliberately
     # and all but absent from natural speech, and only ever matched as a segment
-    # of its own — so "I can scratch that surface" is safe. Empty turns it off;
-    # a single-word marker of your own is fine too. See scratch.py.
-    voice_reset_phrases: list[str] = dataclasses.field(
-        default_factory=lambda: ["scratch scratch", "reset reset"]
-    )
+    # of its own — so "I can scratch that surface" is safe. Add your own
+    # ("scratch scratch", "reset reset", or a single invented marker); empty
+    # turns it off. See scratch.py.
+    voice_reset_phrases: list[str] = dataclasses.field(default_factory=lambda: ["clear clear"])
     # Custom vocabulary: correct the transcript's spelling of terms listed in
     # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.

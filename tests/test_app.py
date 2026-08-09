@@ -872,19 +872,19 @@ class TestVoiceReset:
     def test_only_the_tail_is_inserted(self, app, qtbot):
         app._on_model_ready()
         with patch.object(app.injector, "insert") as insert:
-            app._on_transcribed("Book the room. Scratch scratch, book the hall.")
+            app._on_transcribed("Book the room. Clear clear, book the hall.")
         insert.assert_called_once_with("Book the hall.")
         assert list(app._history) == ["Book the hall."]  # not the discarded half
 
     def test_the_words_used_as_words_are_left_alone(self, app):
         app._on_model_ready()
         with patch.object(app.injector, "insert") as insert:
-            app._on_transcribed("I can scratch that surface.")
-        insert.assert_called_once_with("I can scratch that surface.")
+            app._on_transcribed("Please clear that surface.")
+        insert.assert_called_once_with("Please clear that surface.")
 
     def test_no_phrases_configured_inserts_verbatim(self, app):
         app._on_model_ready()
         app._reset_phrases = compile_reset_phrases([])
         with patch.object(app.injector, "insert") as insert:
-            app._on_transcribed("Book the room. Scratch scratch. Book the hall.")
-        insert.assert_called_once_with("Book the room. Scratch scratch. Book the hall.")
+            app._on_transcribed("Book the room. Clear clear. Book the hall.")
+        insert.assert_called_once_with("Book the room. Clear clear. Book the hall.")
