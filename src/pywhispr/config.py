@@ -19,13 +19,25 @@ APP_NAME = "PyWhispr"
 DEFAULT_HOTKEY_MAC = "<cmd>+<shift>+<space>"
 DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
 
+# Same chord as dictation but with Backspace: "erase what I have said so far".
+DEFAULT_RESET_HOTKEY_MAC = "<cmd>+<shift>+<backspace>"
+DEFAULT_RESET_HOTKEY_OTHER = "<ctrl>+<alt>+<backspace>"
+
+
 def default_hotkey() -> str:
     return DEFAULT_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_HOTKEY_OTHER
+
+
+def default_reset_hotkey() -> str:
+    return DEFAULT_RESET_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_RESET_HOTKEY_OTHER
 
 
 @dataclass
 class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
+    # Pressed mid-recording: drop what has been said so far and keep recording,
+    # for when the sentence came out wrong. "" turns it off.
+    reset_hotkey: str = dataclasses.field(default_factory=default_reset_hotkey)
     input_device: int | None = None  # None = system default microphone
     model_override: str | None = None  # HuggingFace repo id; None = platform default
     # ONNX (Windows/Linux) only. None (the default) chooses: "int8" when the model
@@ -71,6 +83,11 @@ class Config:
     remove_fillers: bool = True
     extra_filler_words: list[str] = dataclasses.field(default_factory=list)
     keep_filler_words: list[str] = dataclasses.field(default_factory=list)
+    # Spoken restart: if the transcript contains one of these phrases, keep only
+    # what was said after the last one. Empty (the default) turns it off — the
+    # phrases are ordinary English, and "scratch that idea" would lose the rest
+    # of the sentence with the audio already gone. See scratch.py.
+    voice_reset_phrases: list[str] = dataclasses.field(default_factory=list)
     # Custom vocabulary: correct the transcript's spelling of terms listed in
     # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.

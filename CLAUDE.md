@@ -116,6 +116,27 @@ key and a failure path) for something reached once in a while.
   assert on the row's `QLabel`, not the item. A scroll range is only real once
   the dialog has been shown.
 
+## Starting over (`reset_hotkey` + `scratch.py`)
+
+Two ways to throw away a sentence that came out wrong:
+
+- **The reset hotkey** (`reset_hotkey`, defaults to the dictation chord with
+  Backspace) drops the audio captured so far and keeps the stream open —
+  `AudioRecorder.reset()` rebinds `_blocks` rather than clearing it, because the
+  PortAudio callback thread may be appending as it runs. Ignored outside
+  RECORDING, and a failure there returns rather than stopping: ending the
+  recording would insert the very words the user asked to be rid of. Its
+  listener is never stopped around a dialog the way the dictation one is — it
+  does nothing outside RECORDING, and no dialog can be open while recording.
+- **Spoken "scratch that"** (`voice_reset_phrases`). Live keyword detection is
+  impossible — transcription only happens once the recording has stopped — so
+  this is a pass over the finished transcript that keeps what follows the *last*
+  phrase. **Off unless the user lists phrases**: "scratch that idea" is a
+  sentence someone means, and the audio is gone. First of the transcript passes,
+  so fillers, vocabulary and the join all work on the surviving words; wrapped
+  by `app._after_reset` like the others, with "a suffix of the input" as the
+  tripwire.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing
