@@ -128,14 +128,21 @@ Two ways to throw away a sentence that came out wrong:
   recording would insert the very words the user asked to be rid of. Its
   listener is never stopped around a dialog the way the dictation one is — it
   does nothing outside RECORDING, and no dialog can be open while recording.
-- **Spoken "scratch that"** (`voice_reset_phrases`). Live keyword detection is
-  impossible — transcription only happens once the recording has stopped — so
+- **Spoken "scratch scratch"** (`voice_reset_phrases`). Live keyword detection
+  is impossible — transcription only happens once the recording has stopped — so
   this is a pass over the finished transcript that keeps what follows the *last*
-  phrase. **Off unless the user lists phrases**: "scratch that idea" is a
-  sentence someone means, and the audio is gone. First of the transcript passes,
-  so fillers, vocabulary and the join all work on the surviving words; wrapped
-  by `app._after_reset` like the others, with "a suffix of the input" as the
-  tripwire.
+  phrase. First of the transcript passes, so fillers, vocabulary and the join all
+  work on the surviving words; wrapped by `app._after_reset` like the others,
+  with "a suffix of the input" as the tripwire.
+  - Telling the command from the same words used as words is the whole problem,
+    and both guards are structural rather than heuristic. **The default phrases
+    are doubled** ("scratch scratch", "reset reset") — immediate repetition is
+    close to absent from natural speech and trivial to say on purpose. **A phrase
+    only counts as a segment of its own**: Whisper punctuates, so the command
+    arrives as "Scratch scratch." or ", scratch scratch," while the innocent use
+    has words glued either side. "I can scratch that surface" survives both ways.
+  - The segment rule applies to whatever is configured, so a user's own
+    single-word marker is safe too; an empty list turns the pass off.
 
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 

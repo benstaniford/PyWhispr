@@ -1,4 +1,4 @@
-"""Spoken restart: "scratch that" and what it throws away.
+"""Spoken restart: "scratch scratch" and what it throws away.
 
 Transcription only happens once the recording has stopped, so there is no way to
 notice the phrase while the user is still talking — the reset *hotkey* is the
@@ -11,8 +11,19 @@ A pure function over strings, like :mod:`pywhispr.join` and
 first letter re-cased), and the caller checks that — the audio is gone by the
 time this runs.
 
-Off unless the user lists phrases: "scratch that idea" is a sentence someone
-means, and there is nothing to re-dictate from.
+The whole difficulty is telling the command from the same words used as words:
+"I can scratch that surface" must survive intact. Two structural guards, no
+heuristics:
+
+- **The default phrases are doubled** — "scratch scratch", "reset reset".
+  Immediate repetition of a word is close to absent from natural speech and
+  trivial to say on purpose, so the command has a shape ordinary dictation does
+  not accidentally take.
+- **A phrase only counts as its own segment.** Whisper punctuates, so the
+  command lands as "Scratch scratch." or "…, scratch scratch, …" while the
+  innocent use sits inside a clause with words either side. Anything with a word
+  glued to it is not a command. This applies to whatever the user configures, so
+  a single-word marker of their own is safe too.
 """
 
 from __future__ import annotations
@@ -22,6 +33,11 @@ import re
 
 log = logging.getLogger(__name__)
 
+# What can stand either side of a segment: sentence and clause punctuation,
+# line breaks, quotes and brackets. A *word* either side is what disqualifies a
+# phrase, so this list only ever has to grow to accept more, never to reject.
+_BOUNDARY = r"[.!?…,;:\r\n\-—–()\[\]{}\"'“”‘’]"
+
 # Punctuation the discarded half left hanging in front of the surviving text.
 _LEADING_PUNCTUATION = re.compile(r"^[\s,.;:!?…\-—–]+")
 
@@ -29,9 +45,12 @@ _LEADING_PUNCTUATION = re.compile(r"^[\s,.;:!?…\-—–]+")
 def compile_reset_phrases(phrases: list[str]) -> re.Pattern[str] | None:
     """One case-insensitive pattern for all `phrases`, or None if there are none.
 
-    Words within a phrase may be separated by any spacing or punctuation in the
-    transcript ("scratch that." then a new sentence), and the whole phrase has
-    to sit on word boundaries so "startover" in a file name is safe.
+    Matches a phrase only where it forms a segment of its own: the boundary
+    before it and after it must be punctuation, a line break or the end of the
+    transcript — never another word.
+
+    Words within a phrase may be separated by any spacing or punctuation, since
+    Whisper is free to write "Scratch, scratch." for the doubled command.
     """
     parts = [
         r"\W+".join(re.escape(word) for word in phrase.split())
@@ -40,7 +59,12 @@ def compile_reset_phrases(phrases: list[str]) -> re.Pattern[str] | None:
     ]
     if not parts:
         return None
-    return re.compile(r"\b(?:" + "|".join(parts) + r")\b", re.IGNORECASE)
+    # The leading \s* sits after the lookbehind so the match may start on the
+    # space following the punctuation ("Yes. Scratch scratch.").
+    return re.compile(
+        rf"(?:^|(?<={_BOUNDARY}))\s*\b(?:{'|'.join(parts)})\b\s*(?:{_BOUNDARY}|$)",
+        re.IGNORECASE,
+    )
 
 
 def strip_before_reset(text: str, pattern: re.Pattern[str] | None) -> str:

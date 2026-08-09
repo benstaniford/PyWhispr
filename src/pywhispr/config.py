@@ -83,11 +83,14 @@ class Config:
     remove_fillers: bool = True
     extra_filler_words: list[str] = dataclasses.field(default_factory=list)
     keep_filler_words: list[str] = dataclasses.field(default_factory=list)
-    # Spoken restart: if the transcript contains one of these phrases, keep only
-    # what was said after the last one. Empty (the default) turns it off — the
-    # phrases are ordinary English, and "scratch that idea" would lose the rest
-    # of the sentence with the audio already gone. See scratch.py.
-    voice_reset_phrases: list[str] = dataclasses.field(default_factory=list)
+    # Spoken restart: say one of these and only what follows the last of them is
+    # kept. Doubled by default because a repeated word is easy to say deliberately
+    # and all but absent from natural speech, and only ever matched as a segment
+    # of its own — so "I can scratch that surface" is safe. Empty turns it off;
+    # a single-word marker of your own is fine too. See scratch.py.
+    voice_reset_phrases: list[str] = dataclasses.field(
+        default_factory=lambda: ["scratch scratch", "reset reset"]
+    )
     # Custom vocabulary: correct the transcript's spelling of terms listed in
     # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.
