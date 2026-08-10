@@ -57,6 +57,11 @@ class Config:
     model_cache_dir: str | None = None
     cuda_dir: str | None = None
     directml_dir: str | None = None
+    # GPU acceleration itself, once its libraries are downloaded. False turns it off
+    # without deleting the ~1.2 GB — the tray menu's "Disable GPU acceleration", so
+    # turning it back on costs no download. "pywhispr disable-gpu" is the one that
+    # deletes. Outranks use_directml: off means off, whichever path is installed.
+    use_gpu: bool = True
     # DirectML is the GPU path for cards CUDA 13 cannot use (pre-Turing NVIDIA, and
     # every AMD or Intel GPU). None means "use it if it has been downloaded"; False
     # turns it off without deleting it. See directml.py.

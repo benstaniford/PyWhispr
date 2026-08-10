@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
+from pywhispr import gpu
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
@@ -80,12 +81,19 @@ class PyWhisprApp(QObject):
         self.backend = create_backend(cfg)
         log.debug("Backend selected: %s", self.backend.name)
         self.overlay = OverlayWindow()
+        # No GPU entry on macOS: neither CUDA nor DirectML has a build for it and
+        # Apple Silicon is on the Metal GPU through MLX already, so the entry could
+        # only ever say no — and until the triggered(checked) fix in tray.py it said
+        # yes instead and started a download that could only fail.
+        gpu_possible = gpu.supported()
         self.tray = TrayIcon(
             on_quit=self._quit,
             on_toggle=self._hotkey_toggled.emit,
             on_change_hotkey=self._change_hotkey,
             on_edit_vocabulary=self._edit_vocabulary,
-            on_enable_gpu=self._enable_gpu,
+            on_enable_gpu=self._enable_gpu if gpu_possible else None,
+            on_disable_gpu=self._disable_gpu if gpu_possible else None,
+            gpu_active=self._gpu_active if gpu_possible else None,
             on_show_history=self._history_requested.emit,
         )
         self._progress_window = None  # kept alive while anything is downloading
@@ -336,6 +344,11 @@ class PyWhisprApp(QObject):
         return None
 
     def _run_gpu_setup(self, first_run: bool = False, kind: str = "cuda"):
+        if not self.cfg.use_gpu:
+            # Setting it up is asking for it. The check at the end of the setup runs
+            # in a subprocess that reads the config, so leaving the switch off would
+            # have it report the CPU and call the install a failure.
+            gpu.turn_on(self.cfg)
         window = self._setup_window()
         window.setup_finished.connect(self._on_gpu_setup_finished)
         window.start_gpu_setup(first_run=first_run, kind=kind)
@@ -518,6 +531,8 @@ class PyWhisprApp(QObject):
 
         if not self.cfg.offer_gpu_setup or self._asked_about_gpu:
             return
+        if not self.cfg.use_gpu:
+            return  # switched off on purpose; the tray entry is how it comes back
         providers = session_providers(getattr(self.backend, "_model", None))
         if any(p != "CPUExecutionProvider" for p in providers):
             return  # already accelerated
@@ -525,13 +540,24 @@ class PyWhisprApp(QObject):
             return
         self._enable_gpu(asked_by_user=False)
 
+    def _gpu_active(self) -> bool:
+        """The tray entry's label: is acceleration installed *and* switched on?"""
+        return gpu.active(self.cfg)
+
     def _enable_gpu(self, asked_by_user: bool = True) -> None:
         from pywhispr import cuda, directml
         from pywhispr.ui.foreground import show_in_front
-        from pywhispr.ui.setup_window import ask_to_enable
+        from pywhispr.ui.setup_window import ask_to_enable, say_restart_needed
 
         if self._progress_window is not None and self._progress_window.gpu_running:
             show_in_front(self._progress_window)  # already doing it
+            return
+        if gpu.installed() and not self.cfg.use_gpu:
+            # Switched off from this same entry, libraries still on disk: flipping the
+            # flag back is the whole job. Before _acceleration_on_offer(), which says
+            # None for an installed path and would otherwise re-run the entire setup.
+            gpu.turn_on(self.cfg)
+            say_restart_needed("GPU acceleration is switched back on.")
             return
         kind = self._acceleration_on_offer()
         if kind is None:
@@ -551,6 +577,41 @@ class PyWhisprApp(QObject):
             return
         # Reuses the window if the model is still downloading into it.
         self._run_gpu_setup(kind=kind)
+
+    def _disable_gpu(self) -> None:
+        """Tray menu: stop using GPU acceleration, keeping the libraries on disk.
+
+        Nothing is reloaded here. onnxruntime resolves a session's providers when it
+        is built and cannot be talked out of them afterwards — the same reason
+        ``cuda.verify()`` needs a subprocess — so the honest answer is the restart
+        notice. ``pywhispr disable-gpu`` is still the one that reclaims the disk.
+        """
+        from pywhispr import cuda, directml
+        from pywhispr.ui.foreground import show_in_front
+        from pywhispr.ui.setup_window import ask_to_disable, say_restart_needed
+
+        if self.state not in (State.IDLE, State.LOADING):
+            return  # no modal mid-recording, like _change_hotkey
+        if self._progress_window is not None and self._progress_window.gpu_running:
+            show_in_front(self._progress_window)  # it is being installed right now
+            return
+        # The dialog takes focus, so what we remembered inserting is no longer
+        # behind the caret; and the chord pressed inside it must not start a
+        # recording.
+        self._context.invalidate()
+        self.listener.stop()
+        try:
+            size = (
+                cuda.APPROXIMATE_DOWNLOAD_MB
+                if cuda.is_installed()
+                else directml.APPROXIMATE_DOWNLOAD_MB
+            )
+            if not ask_to_disable(download_mb=size):
+                return
+            gpu.turn_off(self.cfg)
+            say_restart_needed("GPU acceleration is switched off; the libraries stay on disk.")
+        finally:
+            self._resume_listeners()
 
     def _on_model_failed(self, message: str) -> None:
         """Model load failed: stay alive and keep saying so.

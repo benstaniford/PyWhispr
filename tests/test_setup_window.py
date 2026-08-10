@@ -121,6 +121,13 @@ class TestWhatItPromises:
     def test_the_offer_says_dictation_continues_for_an_existing_install(self):
         assert "keeps working" in self._offer_text(first_run=False)
 
+    def test_the_offer_points_at_the_tray_for_the_undo(self):
+        """Not "pywhispr disable-gpu": the packaged Windows build puts nothing on PATH."""
+        for first_run in (True, False):
+            text = self._offer_text(first_run)
+            assert "tray menu" in text
+            assert "pywhispr" not in text
+
     def test_a_first_run_is_not_told_to_restart(self, qtbot, monkeypatch):
         """The model loads in this process straight afterwards, no session built yet."""
         w = window(qtbot, monkeypatch)
@@ -140,6 +147,59 @@ class TestWhatItPromises:
         w._on_gpu_finished(False, "the driver is too old")
         assert "not enabled" in w._gpu_line.text()
         assert w.result() != w.DialogCode.Accepted
+
+
+class TestWhatTurningItOffPromises:
+    """It only switches off — so it has to say what it does not do."""
+
+    def _disable_box(self, download_mb=1200, click=None):
+        """Run ask_to_disable with distinct button mocks. `click` picks one by label."""
+        buttons = {}
+        with patch.object(setup_window, "QMessageBox") as message_box:
+            box = message_box.return_value
+            box.addButton.side_effect = lambda label, _role: buttons.setdefault(
+                label, MagicMock(name=label)
+            )
+            box.clickedButton.side_effect = lambda: buttons.get(click)
+            answer = setup_window.ask_to_disable(download_mb=download_mb)
+        return box, buttons, answer
+
+    def _disable_text(self, download_mb=1200):
+        box, _buttons, _answer = self._disable_box(download_mb)
+        return box.setInformativeText.call_args.args[0]
+
+    def test_it_says_the_libraries_stay_and_a_restart_is_needed(self):
+        text = self._disable_text()
+        assert "1200 MB" in text
+        assert "stay on disk" in text
+        assert "no download" in text
+        assert "restart" in text.lower()
+
+    def test_it_says_which_command_frees_the_space(self):
+        assert "disable-gpu" in self._disable_text()
+
+    def test_it_still_reads_sensibly_with_no_size_to_quote(self):
+        assert "the downloaded libraries stay on disk" in self._disable_text(download_mb=None)
+
+    def test_cancel_is_the_default_button(self):
+        """The offer defaults to yes because it only adds; this one takes away."""
+        box, buttons, _answer = self._disable_box()
+        box.setDefaultButton.assert_called_once_with(buttons["Cancel"])
+
+    def test_the_button_is_the_only_yes(self):
+        assert self._disable_box(click="Turn off")[2] is True
+        assert self._disable_box(click="Cancel")[2] is False
+
+    def test_closing_it_is_a_no(self):
+        """Escape or the title bar leaves clickedButton() empty; that must not act."""
+        assert self._disable_box(click=None)[2] is False
+
+    def test_the_restart_notice_repeats_the_instruction(self):
+        with patch.object(setup_window, "QMessageBox") as message_box:
+            setup_window.say_restart_needed("GPU acceleration is switched off.")
+        box = message_box.return_value
+        assert box.setText.call_args.args[0] == "GPU acceleration is switched off."
+        assert "Restart PyWhispr" in box.setInformativeText.call_args.args[0]
 
 
 class TestCancelling:

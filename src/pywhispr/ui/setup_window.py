@@ -391,17 +391,19 @@ def ask_to_enable(parent=None, first_run: bool = False, kind: str = "cuda") -> b
         body = (
             "Set it up now? Either way there is a one-time download first, and dictation "
             "cannot start until it finishes. Saying yes downloads more. "
-            "“pywhispr disable-gpu” undoes it later."
+            "The tray menu turns it off again later."
         )
     else:
         body = (
             "Set it up now? There is a one-time download first. Dictation keeps working "
-            "while it runs, and “pywhispr disable-gpu” undoes it."
+            "while it runs, and the tray menu turns it off again."
         )
+    # The undo used to be quoted as "pywhispr disable-gpu", which the packaged
+    # Windows build gives nobody a way to run: it ships one GUI executable, no
+    # console script and nothing on PATH.
     if directml_offer:
         # A different, smaller download, and the honest version of the promise.
         body = body.replace("Saying yes downloads more. ", "")
-        body = body.replace('“pywhispr disable-gpu”', '“pywhispr disable-directml”')
     box.setInformativeText(body)
     download = box.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
     later = box.addButton("No", QMessageBox.ButtonRole.RejectRole)
@@ -417,6 +419,51 @@ def ask_to_enable(parent=None, first_run: bool = False, kind: str = "cuda") -> b
         return None
     assert clicked is later or clicked is None
     return False
+
+
+def ask_to_disable(parent=None, download_mb: int | None = None) -> bool:
+    """Confirm switching GPU acceleration off. True = go ahead.
+
+    Nothing is deleted, so this is reversible for free — but it still needs
+    confirming, because an accidental menu click would otherwise quietly put
+    transcription back on the CPU. The dialog doubles as the restart notice and as
+    the answer to "how do I get the disk space back", which this does not do.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle("PyWhispr — turn off GPU acceleration")
+    box.setIcon(QMessageBox.Icon.Warning)  # not Question: it takes something away
+    box.setText("Turn GPU acceleration off and go back to the CPU?")
+    size = f"the ~{download_mb} MB of libraries" if download_mb else "the downloaded libraries"
+    box.setInformativeText(
+        f"It takes effect when you restart PyWhispr. {size} stay on disk, so turning it "
+        "back on from this menu needs no download — though the next start does fetch the "
+        "smaller CPU-optimised model, which is about twice as fast there. "
+        "Run “pywhispr disable-gpu” instead to delete the libraries and free the space."
+    )
+    turn_off = box.addButton("Turn off", QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    # Cancel by default, unlike the offer: that one only ever adds something.
+    box.setDefaultButton(cancel)
+    show_in_front(box)
+    box.exec()
+    return box.clickedButton() is turn_off
+
+
+def say_restart_needed(message: str, parent=None) -> None:
+    """Tell the user the change lands on the next start, and be seen doing it.
+
+    A box rather than a tray balloon: ``TrayIcon.notify`` is a silent no-op where
+    the tray does not support messages, and Windows files balloons away in the
+    notification centre. This is an instruction, and the user is right here.
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle("PyWhispr — restart needed")
+    box.setIcon(QMessageBox.Icon.Information)
+    box.setText(message)
+    box.setInformativeText("Restart PyWhispr for it to take effect.")
+    box.addButton(QMessageBox.StandardButton.Ok)
+    show_in_front(box)
+    box.exec()
 
 
 __all__ = ["GPU_QUANTIZATION", "SetupWindow", "ask_to_enable"]

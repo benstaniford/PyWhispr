@@ -290,7 +290,12 @@ def activate_if_enabled(cfg) -> bool:
 
     ``use_directml = None`` means "use it if it is there", which is what answering
     the offer leaves behind — the download would otherwise sit unused.
+
+    ``use_gpu = False`` wins over both: the tray's "Disable GPU acceleration" leaves
+    the download in place, so this is what stops it being swapped in anyway.
     """
+    if not cfg.use_gpu:
+        return False
     if cfg.use_directml is False:
         return False
     if not is_installed():

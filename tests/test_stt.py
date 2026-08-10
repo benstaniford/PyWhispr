@@ -242,6 +242,33 @@ def test_real_model_transcribes_fixture():
     assert "transcription" in text
 
 
+class TestProviderChoice:
+    """What a session is asked for, without building one."""
+
+    def test_the_best_advertised_provider_wins(self):
+        from pywhispr.stt.onnx_backend import providers_for
+
+        chosen = providers_for(["DmlExecutionProvider", "CPUExecutionProvider"])
+        assert chosen[0] == "DmlExecutionProvider"
+
+    def test_cpu_only_when_nothing_else_is_advertised(self):
+        from pywhispr.stt.onnx_backend import CPU_ONLY, providers_for
+
+        assert providers_for(["CPUExecutionProvider"]) == CPU_ONLY
+
+    def test_switched_off_refuses_the_gpu_it_is_offered(self):
+        """The libraries are still installed and still advertised; this is the switch."""
+        from pywhispr.stt.onnx_backend import CPU_ONLY, providers_for
+
+        advertised = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        assert providers_for(advertised, use_gpu=False) == CPU_ONLY
+
+    def test_the_flag_reaches_the_backend_from_the_config(self):
+        with patch("sys.platform", "win32"):
+            assert create_backend(Config(use_gpu=False))._use_gpu is False
+            assert create_backend(Config())._use_gpu is True
+
+
 class TestVariantChosenBeforeDownloading:
     """The variants are separate downloads: fp32 2.4GB, int8 0.7GB. Loading the
     wrong one first and correcting afterwards costs the user both."""
@@ -314,6 +341,19 @@ class TestVariantChosenBeforeDownloading:
         backend = OnnxBackend(quantization="")
         backend.choose_quantization()
         assert backend._quantization == ""
+
+    def test_acceleration_switched_off_means_int8_without_probing(self, monkeypatch):
+        """use_gpu=false is a CPU load however much GPU is installed."""
+        from pywhispr.stt import onnx_backend
+        from pywhispr.stt.onnx_backend import CPU_QUANTIZATION, OnnxBackend
+
+        def should_not_be_asked():
+            raise AssertionError("probed the CUDA libraries with acceleration switched off")
+
+        monkeypatch.setattr(onnx_backend, "cuda_libraries_load", should_not_be_asked)
+        backend = OnnxBackend(use_gpu=False)
+        backend.choose_quantization()
+        assert backend._quantization == CPU_QUANTIZATION
 
     def test_the_probe_needs_every_library(self, monkeypatch, tmp_path):
         import ctypes

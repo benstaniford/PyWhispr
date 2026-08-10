@@ -109,6 +109,18 @@ def directml_is_active() -> bool:
         return False
 
 
+def providers_for(advertised: list[str] | set[str], use_gpu: bool = True) -> list[str]:
+    """Which providers to ask a session for, given what onnxruntime advertises.
+
+    ``use_gpu=False`` is the tray's "Disable GPU acceleration": the libraries are
+    still on disk and still advertised, so refusing them here is what turns it off.
+    Its own function so the choice is testable without building a session.
+    """
+    if not use_gpu:
+        return list(CPU_ONLY)
+    return [p for p in PREFERRED_PROVIDERS if p in advertised] or list(CPU_ONLY)
+
+
 def session_providers(model) -> set[str]:
     """Which execution providers the loaded model's sessions are *actually* using.
 
@@ -150,10 +162,12 @@ class OnnxBackend(STTBackend):
         model_id: str | None = None,
         quantization: str | None = None,
         threads: int | None = None,
+        use_gpu: bool = True,
     ):
         self._model_id = model_id or DEFAULT_MODEL
         self._quantization = quantization
         self._threads = DEFAULT_THREADS if threads is None else threads
+        self._use_gpu = use_gpu
         self._model = None
         self._providers: list[str] = []
 
@@ -182,6 +196,12 @@ class OnnxBackend(STTBackend):
         """
         if self._quantization is not None:
             return
+        if not self._use_gpu:
+            # Acceleration is switched off, so this is a CPU load however much GPU
+            # is installed — and int8 is the right weights for one.
+            self._quantization = CPU_QUANTIZATION
+            log.info("GPU acceleration is off: loading the quantised model (%s)", CPU_QUANTIZATION)
+            return
         if cuda_libraries_load():
             return
         if directml_is_active():
@@ -194,17 +214,20 @@ class OnnxBackend(STTBackend):
         import onnxruntime
 
         self.choose_quantization()
-        try:
-            found = add_cuda_dll_directories()
-            log.debug("CUDA DLL directories added: %s", found or "none found")
-            # Adding the directories is not enough on Windows: onnxruntime loads
-            # the CUDA libraries by bare name from its own module directory, so
-            # they have to be pulled into the process first. Both steps are
-            # needed — the search path for the dependencies, this for the loads.
-            if found and hasattr(onnxruntime, "preload_dlls"):
-                onnxruntime.preload_dlls()
-        except Exception:  # never let a GPU nicety stop the app loading
-            log.debug("Could not preload the CUDA libraries", exc_info=True)
+        if not self._use_gpu:
+            log.info("GPU acceleration is off (use_gpu = false): loading on the CPU")
+        else:
+            try:
+                found = add_cuda_dll_directories()
+                log.debug("CUDA DLL directories added: %s", found or "none found")
+                # Adding the directories is not enough on Windows: onnxruntime loads
+                # the CUDA libraries by bare name from its own module directory, so
+                # they have to be pulled into the process first. Both steps are
+                # needed — the search path for the dependencies, this for the loads.
+                if found and hasattr(onnxruntime, "preload_dlls"):
+                    onnxruntime.preload_dlls()
+            except Exception:  # never let a GPU nicety stop the app loading
+                log.debug("Could not preload the CUDA libraries", exc_info=True)
 
         advertised = onnxruntime.get_available_providers()
         log.info(
@@ -214,8 +237,10 @@ class OnnxBackend(STTBackend):
             ", ".join(advertised),
         )
 
-        providers = [p for p in PREFERRED_PROVIDERS if p in advertised] or CPU_ONLY
-        if not any(p != "CPUExecutionProvider" for p in providers):
+        providers = providers_for(advertised, self._use_gpu)
+        # Not warned about when acceleration was switched off on purpose: telling
+        # someone to install DirectML because they turned the GPU off is noise.
+        if self._use_gpu and not any(p != "CPUExecutionProvider" for p in providers):
             log.warning(
                 "No GPU provider available (found: %s) — transcription will run on CPU. "
                 "For an RTX GPU, install onnxruntime-gpu>=1.22 with a CUDA 12.8+ runtime "

@@ -133,6 +133,14 @@ class TestActivateIfEnabled:
     def test_nothing_to_do_when_it_was_never_downloaded(self, install_dir):
         assert directml.activate_if_enabled(Config(use_directml=True)) is False
 
+    def test_off_when_gpu_acceleration_itself_is_switched_off(self, install_dir, monkeypatch):
+        """use_gpu outranks use_directml: the tray's Disable leaves the files here."""
+        make_installed(install_dir)
+        monkeypatch.delitem(sys.modules, "onnxruntime", raising=False)
+        cfg = Config(use_gpu=False, use_directml=True)
+        assert directml.activate_if_enabled(cfg) is False
+        assert str(install_dir) not in sys.path
+
 
 class TestDownload:
     def test_unpacks_the_whole_package_and_writes_the_marker(self, install_dir, tmp_path, monkeypatch):

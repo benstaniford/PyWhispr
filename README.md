@@ -67,6 +67,7 @@ this. (On Windows, double-tap works without any special permission.)
 | `input_device` | system default | Microphone index from `pywhispr devices` |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
+| `use_gpu` | `true` | Windows/Linux only: `false` stops GPU acceleration being used without deleting its libraries — tray menu → **Disable GPU acceleration…** sets it. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
 | `duck_other_audio` | `false` | Windows only: turn other applications' audio down while recording and put it back when the recording stops |
@@ -200,7 +201,13 @@ libraries, including a cuFFT build that is only on NVIDIA's own index; PyWhispr
 puts the pip CUDA wheels' DLL directories on the search path itself, since nothing
 else does.
 
-macOS uses the MLX backend, where none of this applies.
+Tray menu → **Enable GPU acceleration…** does the download, and the same entry
+reads **Disable GPU acceleration…** once it is on — that switches it off without
+deleting anything, so turning it back on needs no second download.
+`pywhispr disable-gpu` is the one that removes the libraries and frees the space.
+
+macOS uses the MLX backend, where none of this applies — and where the tray entry
+is therefore not shown at all.
 
 
 ## Custom vocabulary

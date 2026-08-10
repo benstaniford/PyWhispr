@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from importlib.resources import files
 
 from PySide6.QtCore import QUrl
@@ -10,6 +11,12 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from pywhispr.config import config_path
 from pywhispr.logging_setup import log_path
+
+log = logging.getLogger(__name__)
+
+# One entry, both directions — see the note on _refresh_gpu_label.
+GPU_ENABLE_TEXT = "Enable GPU acceleration…"
+GPU_DISABLE_TEXT = "Disable GPU acceleration…"
 
 
 def app_pixmap() -> QPixmap:
@@ -42,12 +49,18 @@ class TrayIcon(QSystemTrayIcon):
         on_change_hotkey=None,
         on_edit_vocabulary=None,
         on_enable_gpu=None,
+        on_disable_gpu=None,
+        gpu_active=None,
         on_show_history=None,
         parent=None,
     ):
         super().__init__(_make_icon(), parent)
         self._idle_icon = _make_icon(active=False)
         self._active_icon = _make_icon(active=True)
+        self._on_enable_gpu = on_enable_gpu
+        self._on_disable_gpu = on_disable_gpu
+        self._gpu_active = gpu_active
+        self._gpu_action = None
 
         menu = QMenu()
         if on_toggle is not None:
@@ -71,9 +84,15 @@ class TrayIcon(QSystemTrayIcon):
             vocabulary.triggered.connect(on_edit_vocabulary)
             menu.addAction(vocabulary)
         if on_enable_gpu is not None:
-            enable_gpu = QAction("Enable GPU acceleration…", menu)
-            enable_gpu.triggered.connect(on_enable_gpu)
-            menu.addAction(enable_gpu)
+            self._gpu_action = QAction(GPU_ENABLE_TEXT, menu)
+            self._gpu_action.triggered.connect(self._gpu_clicked)
+            menu.addAction(self._gpu_action)
+            # Pulled from the predicate every time the menu opens rather than
+            # pushed from the app, because the answer changes where no signal
+            # reaches: a tray-triggered setup finishing (app._on_gpu_setup_finished
+            # returns early for exactly that case), "pywhispr disable-gpu" in a
+            # terminal, a directory deleted by hand. One connection covers them all.
+            menu.aboutToShow.connect(self._refresh_gpu_label)
         open_config = QAction("Open config file", menu)
         open_config.triggered.connect(self._open_config)
         menu.addAction(open_config)
@@ -88,6 +107,41 @@ class TrayIcon(QSystemTrayIcon):
         menu.addAction(quit_action)
         self.setContextMenu(menu)
         self.set_status("Starting…")
+
+    def _refresh_gpu_label(self) -> None:
+        if self._gpu_action is not None:
+            self._gpu_action.setText(
+                GPU_DISABLE_TEXT if self._gpu_is_active() else GPU_ENABLE_TEXT
+            )
+
+    def _gpu_clicked(self, _checked: bool = False) -> None:
+        """Enable or disable, asked again now rather than read off the label.
+
+        ``_checked`` is ``triggered(bool checked = false)``: PySide6 hands that bool
+        to any slot that will accept an argument, so connecting a handler with an
+        optional first parameter straight to this signal silently passes it False.
+        That is what used to call ``app._enable_gpu(asked_by_user=False)`` on every
+        click — skipping the "not available" answer and offering a CUDA download on
+        machines that cannot run one. Hence the indirection and the ignored argument.
+        """
+        handler = self._on_disable_gpu if self._gpu_is_active() else self._on_enable_gpu
+        if handler is not None:
+            handler()
+
+    def _gpu_is_active(self) -> bool:
+        """Is GPU acceleration on? Anything unanswerable counts as off.
+
+        A raising predicate must not stop the menu opening — a tray app whose menu
+        will not open is the whole UI gone — and "off" is the recoverable direction:
+        the worst it costs is an offer the user declines.
+        """
+        if self._gpu_active is None:
+            return False
+        try:
+            return bool(self._gpu_active())
+        except Exception:
+            log.debug("Could not tell whether GPU acceleration is on", exc_info=True)
+            return False
 
     def set_status(self, text: str, active: bool = False) -> None:
         self.setToolTip(f"PyWhispr — {text}")

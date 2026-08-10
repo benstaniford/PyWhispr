@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -9,14 +10,20 @@ from pywhispr.scratch import compile_reset_phrases
 from pywhispr.vocab import parse_vocabulary
 
 
-@pytest.fixture
-def app(qtbot, qapp):
+@contextlib.contextmanager
+def isolated_app(**config_kwargs):
+    """A PyWhisprApp that touches nothing real. Yields (app, tray class mock).
+
+    Its own context manager as well as a fixture, because a test that is about what
+    the constructor does — which tray entries it asks for, say — needs to build one
+    itself under its own patches.
+    """
     backend = MagicMock()
     backend.name = "mock-backend"
     with (
         patch("pywhispr.app.create_backend", return_value=backend),
         patch("pywhispr.app.AudioRecorder") as recorder_cls,
-        patch("pywhispr.app.TrayIcon"),
+        patch("pywhispr.app.TrayIcon") as tray_cls,
         # Never read the developer's own vocabulary file: tests that assert on
         # exact transcripts would then depend on what is in it.
         patch("pywhispr.app.load_vocabulary", return_value=[]),
@@ -33,18 +40,25 @@ def app(qtbot, qapp):
         # TestContinuationJoin below turns it back on.
         # offer_gpu_setup=False: readying the model must not pop the GPU offer
         # in tests that are about something else.
-        instance = PyWhisprApp(
-            Config(
-                play_sounds=False,
-                api_enabled=False,
-                join_continuations=False,
-                offer_gpu_setup=False,
-            )
+        defaults = dict(
+            play_sounds=False,
+            api_enabled=False,
+            join_continuations=False,
+            offer_gpu_setup=False,
         )
+        instance = PyWhisprApp(Config(**{**defaults, **config_kwargs}))
         instance._test_backend = backend
         instance._test_recorder = recorder
+        try:
+            yield instance, tray_cls
+        finally:
+            instance._worker.shutdown(wait=True)
+
+
+@pytest.fixture
+def app(qtbot, qapp):
+    with isolated_app() as (instance, _tray_cls):
         yield instance
-    instance._worker.shutdown(wait=True)
 
 
 def wait_for_worker(app, qtbot):
@@ -492,6 +506,162 @@ class TestGpuOffer:
             app._enable_gpu(asked_by_user=True)
         ask.assert_not_called()
         app.tray.notify.assert_called_once()
+
+
+class TestGpuTrayEntry:
+    """Whether the tray is given a GPU entry at all."""
+
+    def _tray_kwargs(self, supported, qtbot, qapp):
+        with patch("pywhispr.gpu.supported", return_value=supported):
+            with isolated_app() as (_instance, tray_cls):
+                return tray_cls.call_args.kwargs
+
+    def test_no_entry_where_no_gpu_path_could_run(self, qtbot, qapp):
+        """macOS: CUDA and DirectML have no build for it and MLX is already on Metal."""
+        kwargs = self._tray_kwargs(False, qtbot, qapp)
+        assert kwargs["on_enable_gpu"] is None
+        assert kwargs["on_disable_gpu"] is None
+        assert kwargs["gpu_active"] is None
+
+    def test_an_entry_where_one_could(self, qtbot, qapp):
+        kwargs = self._tray_kwargs(True, qtbot, qapp)
+        assert callable(kwargs["on_enable_gpu"])
+        assert callable(kwargs["on_disable_gpu"])
+        assert callable(kwargs["gpu_active"])
+
+    def test_the_label_asks_whether_it_is_installed_and_on(self, app):
+        with patch("pywhispr.gpu.installed", return_value=True):
+            app.cfg.use_gpu = True
+            assert app._gpu_active() is True
+            app.cfg.use_gpu = False
+            assert app._gpu_active() is False
+
+
+class TestGpuDisable:
+    """The tray entry the other way round: off, but nothing deleted."""
+
+    @pytest.fixture
+    def dialogs(self):
+        with (
+            patch("pywhispr.ui.setup_window.ask_to_disable") as ask,
+            patch("pywhispr.ui.setup_window.say_restart_needed") as told,
+            patch("pywhispr.gpu.save_config") as save,
+            patch("pywhispr.cuda.is_installed", return_value=True),
+            patch("pywhispr.cuda.remove") as cuda_remove,
+            patch("pywhispr.directml.remove") as directml_remove,
+        ):
+            ask.return_value = True
+            yield MagicMock(
+                ask=ask,
+                told=told,
+                save=save,
+                cuda_remove=cuda_remove,
+                directml_remove=directml_remove,
+            )
+
+    def test_it_switches_off_and_says_a_restart_is_needed(self, app, dialogs):
+        app.state = State.IDLE
+        app._disable_gpu()
+        assert app.cfg.use_gpu is False
+        dialogs.save.assert_called_once()
+        dialogs.told.assert_called_once()
+
+    def test_it_deletes_nothing(self, app, dialogs):
+        """"Keep the files" is the whole difference from "pywhispr disable-gpu"."""
+        app.state = State.IDLE
+        app._disable_gpu()
+        dialogs.cuda_remove.assert_not_called()
+        dialogs.directml_remove.assert_not_called()
+
+    def test_declining_the_confirmation_changes_nothing(self, app, dialogs):
+        app.state = State.IDLE
+        dialogs.ask.return_value = False
+        app._disable_gpu()
+        assert app.cfg.use_gpu is True
+        dialogs.save.assert_not_called()
+        dialogs.told.assert_not_called()
+
+    def test_the_hotkey_is_silenced_around_the_dialog(self, app, dialogs):
+        """The chord pressed inside a modal must not start a recording."""
+        app.state = State.IDLE
+        app._disable_gpu()
+        app.listener.stop.assert_called_once()
+        app.listener.start.assert_called()
+
+    def test_the_hotkey_comes_back_even_if_the_dialog_explodes(self, app, dialogs):
+        app.state = State.IDLE
+        dialogs.ask.side_effect = RuntimeError("no Qt today")
+        with pytest.raises(RuntimeError):
+            app._disable_gpu()
+        app.listener.start.assert_called()
+
+    def test_it_waits_until_the_app_is_idle(self, app, dialogs):
+        """Deleting nothing is still no reason for a modal over a live recording."""
+        app.state = State.RECORDING
+        app._disable_gpu()
+        dialogs.ask.assert_not_called()
+        assert app.cfg.use_gpu is True
+
+    def test_it_will_not_fight_a_setup_that_is_still_running(self, app, dialogs):
+        app.state = State.IDLE
+        app._progress_window = MagicMock(gpu_running=True)
+        with patch("pywhispr.ui.foreground.show_in_front") as shown:
+            app._disable_gpu()
+        shown.assert_called_once_with(app._progress_window)
+        dialogs.ask.assert_not_called()
+
+    def test_it_quotes_the_size_of_what_stays_on_disk(self, app, dialogs):
+        from pywhispr import cuda
+
+        app.state = State.IDLE
+        app._disable_gpu()
+        assert dialogs.ask.call_args.kwargs["download_mb"] == cuda.APPROXIMATE_DOWNLOAD_MB
+
+
+class TestGpuEnabledAgain:
+    def test_switching_it_back_on_needs_no_download(self, app):
+        """The libraries never left, so the flag is the whole job."""
+        app.cfg.use_gpu = False
+        with (
+            patch("pywhispr.gpu.installed", return_value=True),
+            patch("pywhispr.gpu.save_config"),
+            patch("pywhispr.ui.setup_window.say_restart_needed") as told,
+            patch("pywhispr.ui.setup_window.ask_to_enable") as ask,
+            patch.object(app, "_run_gpu_setup") as setup,
+        ):
+            app._enable_gpu()
+        assert app.cfg.use_gpu is True
+        told.assert_called_once()
+        ask.assert_not_called()
+        setup.assert_not_called()
+
+    def test_a_setup_asked_for_while_switched_off_switches_it_on(self, app):
+        """The verification subprocess reads the config; off means it reports the CPU."""
+        app.cfg.use_gpu = False
+        with (
+            patch("pywhispr.gpu.save_config"),
+            patch.object(app, "_setup_window") as window,
+        ):
+            app._run_gpu_setup(kind="cuda")
+        assert app.cfg.use_gpu is True
+        window.assert_called_once()
+
+    def test_a_machine_with_nothing_installed_still_gets_the_offer(self, app):
+        with (
+            patch("pywhispr.gpu.installed", return_value=False),
+            patch("pywhispr.cuda.can_offer", return_value=(True, "")),
+            patch("pywhispr.ui.setup_window.ask_to_enable", return_value=False) as ask,
+        ):
+            app._enable_gpu()
+        ask.assert_called_once()
+
+    def test_the_offer_stays_away_while_it_is_switched_off(self, app):
+        """A hand-edited config can have use_gpu false with the offer still on."""
+        app.cfg.offer_gpu_setup = True
+        app.cfg.use_gpu = False
+        with patch.object(app, "_enable_gpu") as enable:
+            app._maybe_offer_gpu()
+        enable.assert_not_called()
 
 
 class TestGpuAskedBeforeAnyDownload:

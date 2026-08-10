@@ -182,6 +182,46 @@ about spelling, unlike joining, which needs a caret.
   the *developer's real* vocabulary file. The `app` fixture patches it (and
   `create_hotkey_listener`, which was quietly claiming a real global hotkey).
 
+## GPU acceleration (`gpu.py` + `cuda.py` + `directml.py`)
+
+CUDA and DirectML are alternatives for the same job, so everything outside them
+asks `gpu.py`: is a path *possible* here, is one *on*, turn it off.
+
+- The tray entry is gated on **platform, not backend**: an Intel Mac runs the ONNX
+  backend too, but its onnxruntime is the CPU build and DirectML has no macOS
+  wheel, so the entry could only ever say no. Apple Silicon is on the Metal GPU
+  through MLX regardless. `gpu.supported()` is deliberately the same
+  `{win32, linux}` list `cuda.can_offer()` and `directml.can_offer()` gate on
+  themselves, rather than a second policy that can drift.
+- **`QAction.triggered` is `triggered(bool checked = false)`, and PySide6 hands
+  that bool to any slot that will accept one.** Connected straight to
+  `app._enable_gpu`, that meant every click passed `asked_by_user=False` — which
+  skipped the "not available" answer and instead offered macOS users a 1.2 GB CUDA
+  download of *manylinux* wheels (`cuda.py` picks manylinux for anything not
+  win32) that could only fail. Tray callbacks take no arguments, or swallow the
+  bool explicitly like `TrayIcon._gpu_clicked`.
+- The Enable/Disable label is **pulled** from a predicate on `QMenu.aboutToShow`,
+  not pushed by the app: `_on_gpu_setup_finished` returns early for a
+  tray-triggered setup — the one case a push would be for — and the answer also
+  changes where no signal reaches (`pywhispr disable-gpu` in a terminal, a
+  directory deleted by hand). A predicate that raises counts as "off": a menu that
+  will not open is the whole UI, and the worst that costs is a declined offer.
+- **Two different "disables", on purpose.** The tray sets `use_gpu = false` and
+  leaves the download alone, so switching back on costs nothing;
+  `pywhispr disable-gpu` deletes the libraries and reclaims the disk. `use_gpu`
+  outranks `use_directml` and is honoured in `directml.activate_if_enabled` and
+  `onnx_backend.providers_for` — the libraries are still advertised, so refusing
+  them there is what actually turns it off.
+- Neither direction can take effect in-process: onnxruntime resolves a session's
+  providers when it is built, which is why `cuda.verify()` needs a subprocess and
+  why both paths end in a restart notice. `_run_gpu_setup` switches `use_gpu` back
+  on before that check, or it would read the config, report the CPU and call a
+  good install a failure.
+- `gpu.turn_off` also clears `offer_gpu_setup` (or the next start offers to install
+  what was just switched off) and resets `model_quantization` when it is `""` —
+  the empty string is only ever written by the first-run CUDA path, and full
+  precision on the CPU is the slowest combination there is.
+
 ## Debugging native crashes here
 
 - **`lldb` attach is blocked by MDM** and **ReportCrash is disabled** (no
