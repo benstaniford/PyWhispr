@@ -34,7 +34,10 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     # Sets PYWHISPR_LITE=1 before any pywhispr import, so this bundle *is* Lite.
-    runtime_hooks=["rthook_lite.py"],
+    # Absolute via SPECPATH: PyInstaller resolves runtime_hooks relative to the
+    # working directory (the repo root in CI), not the spec's directory like it
+    # does for datas/pathex, so a bare name is not found.
+    runtime_hooks=[os.path.join(SPECPATH, "rthook_lite.py")],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
