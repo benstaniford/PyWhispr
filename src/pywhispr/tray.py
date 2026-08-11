@@ -9,6 +9,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from pywhispr import flavor
 from pywhispr.config import config_path
 from pywhispr.logging_setup import log_path
 
@@ -52,6 +53,7 @@ class TrayIcon(QSystemTrayIcon):
         on_disable_gpu=None,
         gpu_active=None,
         on_show_history=None,
+        on_set_server=None,
         parent=None,
     ):
         super().__init__(_make_icon(), parent)
@@ -83,6 +85,12 @@ class TrayIcon(QSystemTrayIcon):
             vocabulary = QAction("Vocabulary…", menu)
             vocabulary.triggered.connect(on_edit_vocabulary)
             menu.addAction(vocabulary)
+        if on_set_server is not None:
+            # Lite only: where transcription is sent. Provided by the app only in
+            # the Lite build, so the full app's menu is unchanged.
+            set_server = QAction("Set server…", menu)
+            set_server.triggered.connect(on_set_server)
+            menu.addAction(set_server)
         if on_enable_gpu is not None:
             self._gpu_action = QAction(GPU_ENABLE_TEXT, menu)
             self._gpu_action.triggered.connect(self._gpu_clicked)
@@ -102,7 +110,7 @@ class TrayIcon(QSystemTrayIcon):
         open_log.triggered.connect(self._open_log)
         menu.addAction(open_log)
         menu.addSeparator()
-        quit_action = QAction("Quit PyWhispr", menu)
+        quit_action = QAction(f"Quit {flavor.PRODUCT_NAME}", menu)
         quit_action.triggered.connect(on_quit)
         menu.addAction(quit_action)
         self.setContextMenu(menu)
@@ -144,7 +152,7 @@ class TrayIcon(QSystemTrayIcon):
             return False
 
     def set_status(self, text: str, active: bool = False) -> None:
-        self.setToolTip(f"PyWhispr — {text}")
+        self.setToolTip(f"{flavor.PRODUCT_NAME} — {text}")
         self.setIcon(self._active_icon if active else self._idle_icon)
 
     def _open_config(self) -> None:

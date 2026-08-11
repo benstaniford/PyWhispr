@@ -12,9 +12,13 @@ from pathlib import Path
 import tomli_w
 from platformdirs import user_config_dir
 
+from pywhispr import flavor
+
 log = logging.getLogger(__name__)
 
-APP_NAME = "PyWhispr"
+# The Lite build (flavor.IS_LITE) reports "PyWhisprLite" here, which gives it its
+# own config directory so it and a full install do not share one config.toml.
+APP_NAME = flavor.PRODUCT_NAME
 
 DEFAULT_HOTKEY_MAC = "<cmd>+<shift>+<space>"
 DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
@@ -107,6 +111,10 @@ class Config:
     api_port: int = 9149
     api_max_audio_seconds: int = 300
     api_max_queue: int = 4
+    # PyWhisprLite only: the transcription server this client sends audio to
+    # (a full PyWhispr's api_host:api_port, or any compatible /v1/transcribe).
+    # Empty prompts on startup — see ui/server_dialog.py. Ignored by the full app.
+    server_url: str = ""
 
 
 def config_path() -> Path:

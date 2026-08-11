@@ -12,7 +12,15 @@ __all__ = ["SAMPLE_RATE", "STTBackend", "create_backend"]
 
 
 def create_backend(cfg: Config) -> STTBackend:
-    """Pick the STT backend for this machine: MLX on Apple Silicon, ONNX elsewhere."""
+    """Pick the STT backend: remote in the Lite build, else MLX/ONNX by platform."""
+    from pywhispr import flavor
+
+    if flavor.IS_LITE:
+        # PyWhisprLite runs no model locally; it POSTs to a configured server.
+        from pywhispr.stt.remote_backend import RemoteBackend
+
+        return RemoteBackend(cfg.server_url)
+
     if sys.platform == "darwin" and platform.machine() == "arm64":
         from pywhispr.stt.mlx_backend import MlxBackend
 

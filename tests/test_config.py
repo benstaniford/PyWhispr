@@ -35,6 +35,22 @@ def test_none_values_survive_round_trip(tmp_path):
     assert loaded.model_override is None
 
 
+def test_server_url_round_trips(tmp_path):
+    path = tmp_path / "config.toml"
+    cfg = Config(server_url="http://desktop.local:9149")
+    save_config(cfg, path)
+    assert load_config(path).server_url == "http://desktop.local:9149"
+
+
+def test_app_name_comes_from_the_flavor():
+    # The config directory is derived from APP_NAME, so this wiring is what keeps
+    # a Lite install's config separate from a full one's.
+    import pywhispr.config as config_module
+    import pywhispr.flavor as flavor
+
+    assert config_module.APP_NAME == flavor.PRODUCT_NAME
+
+
 def test_unknown_keys_ignored(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('hotkey = "<f9>"\nfuture_option = true\n')

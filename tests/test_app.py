@@ -72,6 +72,21 @@ def test_starts_in_loading_and_ignores_nothing_burger(app):
     assert app.state == State.LOADING
 
 
+class TestLiteMode:
+    """The Lite build offers a "Set server…" entry and hosts no API of its own."""
+
+    def test_offers_set_server_and_hosts_no_api(self, qapp, monkeypatch):
+        monkeypatch.setattr("pywhispr.flavor.IS_LITE", True)
+        with isolated_app(api_enabled=True) as (instance, tray_cls):
+            assert instance.api is None  # a client does not also host a server
+            assert tray_cls.call_args.kwargs["on_set_server"] is not None
+
+    def test_full_build_has_no_set_server_entry(self, qapp, monkeypatch):
+        monkeypatch.setattr("pywhispr.flavor.IS_LITE", False)
+        with isolated_app() as (instance, tray_cls):
+            assert tray_cls.call_args.kwargs["on_set_server"] is None
+
+
 class TestPushToTalk:
     def _ready(self, app):
         app._on_model_ready()

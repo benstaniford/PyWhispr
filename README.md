@@ -443,6 +443,10 @@ microphone prompt shows "PyWhispr" instead of your terminal's name.
 Pushing a tag like `v0.2.0` triggers GitHub Actions to build and attach to the release:
 
 - `PyWhispr-<tag>-macos-arm64.zip` — the `.app` bundle (PyInstaller, ad-hoc signed)
+- `PyWhisprLite-<tag>-macos-x86_64.zip` — the Intel-Mac build (macOS 13 Ventura and up).
+  It runs no model locally; it sends audio to a full PyWhispr's network API instead, so
+  it prompts for that server's address on first launch (change it later from the tray's
+  "Set server…"). Installs and configures separately from the full app.
 - `PyWhispr-<tag>-windows-x64.msi` — per-user installer (cx_Freeze), no admin required,
   with a launch-on-finish checkbox and an HKCU `Run` entry for autostart
 

@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
-from pywhispr import gpu
+from pywhispr import flavor, gpu
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder
 from pywhispr.caret import ContextTracker
@@ -95,6 +95,9 @@ class PyWhisprApp(QObject):
             on_disable_gpu=self._disable_gpu if gpu_possible else None,
             gpu_active=self._gpu_active if gpu_possible else None,
             on_show_history=self._history_requested.emit,
+            # Lite only: the model runs on another machine, so the user needs a
+            # way to say which one. The full app never shows this entry.
+            on_set_server=self._set_server if flavor.IS_LITE else None,
         )
         self._progress_window = None  # kept alive while anything is downloading
         self._load_model = None  # set by start(), possibly deferred behind GPU setup
@@ -134,6 +137,8 @@ class PyWhisprApp(QObject):
         # Network API. Requests run on their own threads but hand the actual
         # transcription to _worker, so the model is still only ever used by one
         # thread at a time and remote work queues behind local dictation.
+        # Not in the Lite build: it has no local model to expose — it is itself a
+        # client of some other machine's API — so hosting one would only forward.
         self.api = (
             TranscriptionServer(
                 transcribe=self._api_transcribe,
@@ -143,7 +148,7 @@ class PyWhisprApp(QObject):
                 max_audio_seconds=cfg.api_max_audio_seconds,
                 max_queue=cfg.api_max_queue,
             )
-            if cfg.api_enabled
+            if cfg.api_enabled and not flavor.IS_LITE
             else None
         )
 
@@ -188,11 +193,11 @@ class PyWhisprApp(QObject):
         self.tray.set_status("Loading model…")
         if self.api is not None and not self.api.start():
             self.tray.notify(
-                "PyWhispr: network API off",
+                f"{flavor.PRODUCT_NAME}: network API off",
                 f"Port {self.cfg.api_port} is already in use. Dictation still works.",
             )
         if not warn_if_missing_permissions():
-            self.tray.notify("PyWhispr: clipboard mode", MACOS_PERMISSIONS_HELP)
+            self.tray.notify(f"{flavor.PRODUCT_NAME}: clipboard mode", MACOS_PERMISSIONS_HELP)
         try:
             self.listener.start()
             log.info("Hotkey listener started (%s)", type(self.listener).__name__)
@@ -226,6 +231,13 @@ class PyWhisprApp(QObject):
                 self._model_failed.emit(f"{type(exc).__name__}: {exc}")
 
         self._load_model = load
+        if flavor.IS_LITE:
+            # No local model, so none of the download/storage/GPU first-run flows
+            # apply — just make sure we know which server to talk to, then connect.
+            if not self.cfg.server_url:
+                self._prompt_for_server()
+            self._begin_model_load()
+            return
         self._offer_another_drive()
         if self._offer_gpu_before_downloading():
             return  # the model load waits for the CUDA setup to finish
@@ -409,6 +421,8 @@ class PyWhisprApp(QObject):
 
     def _show_model_download(self) -> None:
         """On a first run, show the download rather than a silent "Loading…"."""
+        if flavor.IS_LITE:
+            return  # nothing is downloaded: the model lives on the remote server
         from pywhispr.download import model_cached
 
         # Before the cached check, not after: download_mb depends on which variant
@@ -469,6 +483,34 @@ class PyWhisprApp(QObject):
         log.error("%s: %s", title, message)
         self.tray.set_status(message)
         self.tray.notify(title, f"{message}\n\nDetails: {log_path()}")
+
+    # -- remote server (Lite build only) -------------------------------------
+
+    def _prompt_for_server(self) -> None:
+        """Ask for the server URL and apply it. Used at first run and from the tray."""
+        from pywhispr.ui.server_dialog import ServerDialog
+
+        url = ServerDialog.get_server_url(self.cfg.server_url)
+        if url is None or url == self.cfg.server_url:
+            return  # cancelled, or unchanged: nothing to rebuild
+        self._apply_server_url(url)
+
+    def _set_server(self) -> None:
+        """Tray 'Set server…': repoint at a different server and reconnect."""
+        self._prompt_for_server()
+
+    def _apply_server_url(self, url: str) -> None:
+        """Save the new server, rebuild the backend and (re)connect to it."""
+        self.cfg.server_url = url
+        save_config(self.cfg)
+        log.info("Server set; rebuilding the remote backend")
+        self.backend = create_backend(self.cfg)
+        self._set_state(State.LOADING)
+        self.tray.set_status("Connecting to server…")
+        # The load() is only a health check for the remote backend, but running it
+        # off the worker keeps the pattern identical to the local backends and off
+        # the UI thread.
+        self._worker.submit(self._load_model)
 
     # -- network API hooks (called on API request threads) --------------------
 
@@ -1043,7 +1085,7 @@ def run_app() -> int:
 
     install_qt_message_handler()  # before QApplication, to catch platform-plugin gripes
     app = QApplication(sys.argv)
-    app.setApplicationName("PyWhispr")
+    app.setApplicationName(flavor.PRODUCT_NAME)
     app.setWindowIcon(QIcon(app_pixmap()))
     app.setQuitOnLastWindowClosed(False)  # tray app: no windows most of the time
 

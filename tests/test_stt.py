@@ -41,6 +41,24 @@ class TestBackendSelection:
         assert "someone/custom-model" in backend.name
 
 
+class TestLiteBackendSelection:
+    """The Lite build transcribes over the network regardless of platform."""
+
+    def test_lite_gets_the_remote_backend(self, monkeypatch):
+        from pywhispr.stt.remote_backend import RemoteBackend
+
+        monkeypatch.setattr("pywhispr.flavor.IS_LITE", True)
+        backend = create_backend(Config(server_url="host:9149"))
+        assert isinstance(backend, RemoteBackend)
+        assert "host:9149" in backend.name
+
+    def test_full_build_is_unaffected(self, monkeypatch):
+        monkeypatch.setattr("pywhispr.flavor.IS_LITE", False)
+        with patch("sys.platform", "win32"):
+            backend = create_backend(Config())
+        assert "onnx-asr" in backend.name
+
+
 class TestOnnxProviderFallback:
     """onnxruntime-gpu advertises CUDAExecutionProvider even with no CUDA runtime,
     so a load can only be trusted once it has actually succeeded."""

@@ -5,14 +5,16 @@ from __future__ import annotations
 import logging
 import sys
 
+from pywhispr import flavor
+
 log = logging.getLogger(__name__)
 
-MACOS_PERMISSIONS_HELP = """\
-Accessibility permission is not granted, so PyWhispr cannot paste text into
+MACOS_PERMISSIONS_HELP = f"""\
+Accessibility permission is not granted, so {flavor.PRODUCT_NAME} cannot paste text into
 other apps automatically. Dictation still works: the transcript is copied to
 the clipboard — press Cmd+V yourself to paste it.
 
-For automatic pasting, grant Accessibility to the app you launch PyWhispr
+For automatic pasting, grant Accessibility to the app you launch {flavor.PRODUCT_NAME}
 from (e.g. Terminal) in System Settings → Privacy & Security → Accessibility,
 then fully relaunch that app. No other permission is needed; the global
 hotkey works without Input Monitoring.
@@ -64,11 +66,11 @@ def request_macos_input_monitoring() -> None:
         ctypes.cdll.LoadLibrary(path).CGRequestListenEventAccess()
 
 
-MACOS_INPUT_MONITORING_HELP = """\
+MACOS_INPUT_MONITORING_HELP = f"""\
 Double-tap hotkeys listen for modifier key taps, which macOS gates behind the
-Input Monitoring permission. Grant it to PyWhispr (or the terminal you launch
+Input Monitoring permission. Grant it to {flavor.PRODUCT_NAME} (or the terminal you launch
 it from) in System Settings → Privacy & Security → Input Monitoring, then
-relaunch PyWhispr. Until then the double-tap hotkey will not fire.
+relaunch {flavor.PRODUCT_NAME}. Until then the double-tap hotkey will not fire.
 Chord hotkeys (e.g. Cmd+Shift+Space) work without any permission.
 """
 
