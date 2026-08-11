@@ -34,10 +34,13 @@ jobs:
           path: dist/PyWhispr-${{ github.ref_name }}-macos-arm64.zip
 
   macos-app-lite:
-    name: Build macOS Lite app (x86_64, Ventura)
-    # macos-13 is the last Intel runner (macos-14+ are Apple Silicon), and it runs
-    # Ventura — so the binary is built against the Ventura SDK it must run on.
-    runs-on: macos-13
+    name: Build macOS Lite app (x86_64)
+    # The Intel runner. macos-13 was retired on 2025-12-04, so its label no longer
+    # matches any runner and jobs on it queue forever; macos-15-intel is GitHub's
+    # standard Intel replacement (Intel support ends entirely in Fall 2027). The
+    # bundle still runs on Ventura and up: it pins LSMinimumSystemVersion 13.0 and
+    # none of Lite's prebuilt wheels require a newer macOS than the build host.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
