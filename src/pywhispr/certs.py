@@ -13,12 +13,19 @@ the machine trusts, we trust. Nothing here is specific to one CA or one vendor
 and no certificate is shipped or pinned, so a rotated or replaced corporate
 root needs no change to PyWhispr.
 
-Two things this deliberately does not do:
+Injection is unconditional, including when the CA-bundle environment variables
+are set. Standing aside for those was worse than useless on the machine this
+came from: ``SSL_CERT_FILE`` pointed at a single corporate ``.cer``, which
+replaces the public roots rather than adding to them, so every download failed
+with "unable to get local issuer certificate" — and it only started failing when
+``huggingface_hub`` 1.x moved from ``requests`` to ``httpx``, which reads
+``SSL_CERT_FILE`` where ``requests`` reads ``REQUESTS_CA_BUNDLE``. Nothing is
+lost by injecting anyway: truststore tries the OS store first and falls back to a
+chain engine trusting whatever ``load_verify_locations`` was given, so an
+explicit bundle still counts.
 
-* **Override an explicit choice.** If any of the CA-bundle environment
-  variables is set, the user has configured certificates on purpose (it is what
-  the README tells them to do) and we leave verification alone rather than
-  quietly changing it underneath them.
+One thing this deliberately does not do:
+
 * **Fail loudly.** Injection is best-effort. If truststore is missing from a
   build or the platform call fails, we log it and carry on with certifi — which
   is exactly the old behaviour, and still works everywhere that isn't
@@ -33,9 +40,8 @@ import os
 
 log = logging.getLogger(__name__)
 
-# SSL_CERT_FILE is read by Python's ssl module, so it covers httpx (and
-# therefore huggingface_hub's downloads); REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE
-# are honoured by requests alone. Any of them means "certificates are handled".
+# Reported, not obeyed: which of these is set decides which stack breaks when one
+# of them names a bundle without the public roots, so a bug report needs to say.
 CA_BUNDLE_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 
 _status = "not attempted"
@@ -54,12 +60,6 @@ def use_system_certificates() -> str:
     """
     global _status
 
-    overrides = [name for name in CA_BUNDLE_ENV_VARS if os.environ.get(name)]
-    if overrides:
-        _status = f"certifi/explicit bundle ({', '.join(overrides)} set)"
-        log.debug("Leaving TLS verification alone: %s", _status)
-        return _status
-
     try:
         import truststore
 
@@ -75,6 +75,9 @@ def use_system_certificates() -> str:
         )
         return _status
 
+    bundles = [name for name in CA_BUNDLE_ENV_VARS if os.environ.get(name)]
     _status = "system trust store (truststore)"
+    if bundles:
+        _status += f", plus the bundle in {', '.join(bundles)}"
     log.debug("TLS verification now uses the system certificate store")
     return _status
