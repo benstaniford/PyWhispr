@@ -4,9 +4,12 @@ Two sources, and they load differently on purpose:
 
 - **Built-ins** live in :mod:`pywhispr.plugins.builtin` and are listed in
   :data:`BUILTINS` as ordinary module names, imported with ``import_module``.
-  Not discovered by scanning the package: PyInstaller and cx_Freeze find imports
-  by reading the source, so a plugin only ever named at runtime would be missing
-  from both packaged builds — the kind of bug that only shows up after release.
+  Because that import name is built at runtime the packaged builds cannot see it
+  by static analysis, so each build must be told about the subpackage explicitly:
+  the PyInstaller spec collects ``pywhispr.plugins.builtin`` into hiddenimports,
+  and the cx_Freeze setup force-includes the whole ``pywhispr`` package. Miss
+  either and the built-ins vanish from that build alone — the kind of bug that
+  only shows up after release (macOS shipped without them in v0.2.16).
 - **User plugins** are ``*.py`` files in ``<config dir>/plugins``, loaded by path.
   One try/except each, so a file with a syntax error costs its own plugin and
   nothing else.

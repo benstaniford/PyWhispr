@@ -258,9 +258,14 @@ opening word that join then decides about.
   nothing but emoji.** `!` and `?` stay (the model does not add those), the trailing
   mark goes only at the very end of the transcript so a clause-separating comma
   survives, and the absorbed separator comes back as a single space.
-- **`BUILTINS` names modules statically** because PyInstaller and cx_Freeze find
-  imports by reading source; a plugin only ever named at runtime would be missing
-  from both packaged builds. No spec change needed as a result.
+- **`BUILTINS` names modules as strings, imported at runtime** — so the packaged
+  builds cannot see them by static analysis and each must be told about the
+  subpackage explicitly. The PyInstaller spec `collect_submodules`es
+  `pywhispr.plugins.builtin`; cx_Freeze force-includes the whole `pywhispr`
+  package (its `packages` list), which sweeps them up incidentally. Miss the
+  PyInstaller side and the built-ins vanish from the macOS build alone —
+  `ModuleNotFoundError: No module named 'pywhispr.plugins.builtin'`, which is
+  exactly how v0.2.16 shipped emoji broken on Mac while working on Windows.
 - **No reload.** A plugin that started a thread cannot be un-imported, so the tray
   opens the folder and a restart applies changes. `plugins/__init__.py`
   deliberately re-exports nothing: `api` and `engine` are stdlib-only, and a

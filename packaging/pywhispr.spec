@@ -10,6 +10,14 @@ binaries = []
 # the submodules too — the backends sit behind sys.platform conditionals.
 hiddenimports = collect_submodules("truststore")
 
+# Built-in plugins are imported by a name built at runtime
+# (importlib.import_module(f"pywhispr.plugins.builtin.{name}")), so the modulegraph
+# never sees them and the whole subpackage is left out of the bundle — the emoji
+# plugin then fails to load with "No module named 'pywhispr.plugins.builtin'".
+# Windows escapes this only because cx_Freeze force-includes the entire pywhispr
+# tree; PyInstaller needs them named explicitly.
+hiddenimports += collect_submodules("pywhispr.plugins.builtin")
+
 # mlx ships a compiled core + metal shader library; parakeet_mlx and librosa
 # have data files and lazy imports that static analysis misses.
 for pkg in ("mlx", "parakeet_mlx", "librosa"):
