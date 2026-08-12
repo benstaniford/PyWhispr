@@ -182,6 +182,87 @@ about spelling, unlike joining, which needs a caret.
   the *developer's real* vocabulary file. The `app` fixture patches it (and
   `create_hotkey_listener`, which was quietly claiming a real global hotkey).
 
+## Plugins (`plugins/` + `plugins/builtin/emoji.py`)
+
+The other passes each do one fixed job; this is the open-ended one — a phrase the
+user says and what happens when they say it. Sits **after vocab, before join**: a
+trigger should benefit from the user's spellings, and a rewrite can change the
+opening word that join then decides about.
+
+- **The framework does the splicing, never the plugin.** A plugin returns a span
+  plus a replacement and `engine.apply_plugins` concatenates untouched slices
+  around it, exactly like `apply_vocabulary`. That is what makes arbitrary user
+  code safe here: text outside a claim cannot be disturbed, and a plugin cannot
+  return a whole new transcript, so it cannot lose one. `app._via_plugins` needs
+  no length tripwire as a result — the ratio check `_corrected` uses would be the
+  wrong instrument anyway, since "thumbs up emoji" legitimately becomes one
+  character.
+- **A claim is confined to the words the plugin was shown** (`Match.window_start`
+  /`window_end`), or a trigger at the end of a long dictation could replace the
+  whole thing. The window stretches over punctuation only on a side with *no*
+  context word — without that, a command-only plugin ("new paragraph") cannot
+  reach the full stop the model put after it and leaves a lone `.` behind.
+- **Two phases, split on purpose.** `rewrite` is synchronous on the GUI thread
+  inside the pass; `act` runs on its own single thread from
+  `_on_insert_finished`. That ordering is the point: an action that types, switches
+  window or reads the clipboard has to happen *after* the paste. One thread, not a
+  pool, so two plugins cannot fight over the keyboard, and never the STT worker,
+  or a slow plugin would delay the next dictation.
+- **`_api_transcribe` gets rewrites and never actions.** `api_host` defaults to
+  `0.0.0.0` with no authentication, so anything that can reach the port chooses the
+  words that arrive; side effects must not be one keyword away from that. Enforced
+  by `collect_actions=False` rather than a config flag, which also keeps the pass
+  off `self` on a request thread.
+- **Returning `None` is the false-trigger guard, and it lives in the plugin** —
+  only emoji knows that "send me an emoji" names no emoji. Same problem
+  `scratch.py` has, so `at_segment_end` is the same structural answer.
+- Emoji is **a curated alias table over a `unicodedata` name index**, no data file
+  and no dependency (~3,000 names in ~1.5ms, built lazily). The aliases are not
+  decoration: the stdlib carries the *legacy* Unicode 6 names, so "red heart"
+  finds nothing (❤ is `HEAVY BLACK HEART`), "smiling face" prefix-matches
+  `SMILING FACE WITH HALO`, and the UCD version travels with the Python version.
+  **The alias table is consulted before the function-word guard** — "plus one" is
+  two function words and would otherwise never be looked up — the same way an
+  explicit `heard => wanted` vocabulary line skips the fuzzy tier's guards.
+  `like`, `no` and `done` are deliberately *not* aliases: each lands in front of
+  the word "emoji" in sentences about emoji.
+- **Emoji's position guard is `_is_a_request`, not the Trigger's `at_segment_end`.**
+  It has to be: a chain ("man emoji gun emoji") has an ordinary word after its first
+  trigger, so the segment rule discarded the first half before the plugin saw it. A
+  request is accepted where it ends a clause *or* leads a chain, and a chain link
+  only counts when the words between the two triggers name an emoji **in their
+  entirety** — that is what separates "man emoji gun emoji" (two requests) from "I
+  use the fire emoji and the water emoji", where "and the water" resolves to nothing
+  and stays prose. `at_segment_end` remains a framework feature for user plugins.
+- **The trigger word is refused as a name.** The UCD has `EMOJI COMPONENT BALD` and
+  three siblings, so the prefix tier answered "emoji emoji" with a hairstyle.
+- **21 aliases exist purely because the legacy names are unreachable by ear**: 🔫 is
+  `PISTOL`, 🍔 is `HAMBURGER`, ⛳ is `FLAG IN HOLE`. Verify a codepoint's real
+  `unicodedata.name` before adding one — `U+1FA9B` is `SCREWDRIVER`, not a drill,
+  and `U+1FA88` is `FLUTE`, not a whistle.
+- **Emoji absorbs the punctuation the model invented** (`_claim_span`): the trailing
+  full stop, and a comma immediately in front of the name. Both are the model's,
+  not the speaker's — every transcript gets a full stop appended, and a comma lands
+  wherever it heard the pause before the name, so "hello smile emoji" arrives as
+  "Hello, smile emoji." and pasted as-is reads "Hello, 🙂." The full stop also has a
+  concrete cost: **Teams and Slack only render the large emoji when the message is
+  nothing but emoji.** `!` and `?` stay (the model does not add those), the trailing
+  mark goes only at the very end of the transcript so a clause-separating comma
+  survives, and the absorbed separator comes back as a single space.
+- **`BUILTINS` names modules statically** because PyInstaller and cx_Freeze find
+  imports by reading source; a plugin only ever named at runtime would be missing
+  from both packaged builds. No spec change needed as a result.
+- **No reload.** A plugin that started a thread cannot be un-imported, so the tray
+  opens the folder and a restart applies changes. `plugins/__init__.py`
+  deliberately re-exports nothing: `api` and `engine` are stdlib-only, and a
+  re-export would drag `registry` → `config` → `platformdirs` into every plugin
+  that imports a dataclass.
+- **Never log the transcript, the matched words or a rewrite** — plugin name,
+  spans and counts only, like everything else that touches the user's words.
+- Testing gotcha: `isolated_app` patches `load_plugins` as well as
+  `load_vocabulary`. Without it the suite loads the *developer's* plugins folder,
+  and a plugin of theirs with an `act()` would really run.
+
 ## GPU acceleration (`gpu.py` + `cuda.py` + `directml.py`)
 
 CUDA and DirectML are alternatives for the same job, so everything outside them

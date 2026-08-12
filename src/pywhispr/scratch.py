@@ -37,7 +37,9 @@ log = logging.getLogger(__name__)
 # What can stand either side of a segment: sentence and clause punctuation,
 # line breaks, quotes and brackets. A *word* either side is what disqualifies a
 # phrase, so this list only ever has to grow to accept more, never to reject.
-_BOUNDARY = r"[.!?…,;:\r\n\-—–()\[\]{}\"'“”‘’]"
+# Public because pywhispr.plugins.engine applies the same segment rule to a
+# plugin trigger, and two copies of a list that grows would drift.
+SEGMENT_BOUNDARY = r"[.!?…,;:\r\n\-—–()\[\]{}\"'“”‘’]"
 
 # Punctuation the discarded half left hanging in front of the surviving text.
 _LEADING_PUNCTUATION = re.compile(r"^[\s,.;:!?…\-—–]+")
@@ -63,7 +65,8 @@ def compile_reset_phrases(phrases: list[str]) -> re.Pattern[str] | None:
     # The leading \s* sits after the lookbehind so the match may start on the
     # space following the punctuation ("Yes. Clear clear.").
     return re.compile(
-        rf"(?:^|(?<={_BOUNDARY}))\s*\b(?:{'|'.join(parts)})\b\s*(?:{_BOUNDARY}|$)",
+        rf"(?:^|(?<={SEGMENT_BOUNDARY}))\s*\b(?:{'|'.join(parts)})\b\s*"
+        rf"(?:{SEGMENT_BOUNDARY}|$)",
         re.IGNORECASE,
     )
 

@@ -104,6 +104,14 @@ class Config:
     # near miss on longer terms; turn it off to only ever match them exactly.
     vocabulary_enabled: bool = True
     vocabulary_fuzzy: bool = True
+    # Plugins: a phrase you say, and what happens when you say it (tray menu →
+    # Open plugins folder…). plugins_enabled is the master switch;
+    # plugin_actions_enabled leaves plugins able to rewrite text but stops them
+    # doing anything else, which is the half that can reach outside PyWhispr.
+    # Per-plugin: [plugins.<name>] enabled = false. See plugins/registry.py.
+    plugins_enabled: bool = True
+    plugin_actions_enabled: bool = True
+    plugins: dict[str, dict] = dataclasses.field(default_factory=dict)
     # Network transcription API. Open to the LAN with no authentication:
     # set api_host to "127.0.0.1" to keep it on this machine only.
     api_enabled: bool = True

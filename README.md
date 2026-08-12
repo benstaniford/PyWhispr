@@ -83,6 +83,9 @@ this. (On Windows, double-tap works without any special permission.)
 | `keep_filler_words` | `[]` | Built-in fillers to leave alone, e.g. `["er", "well"]` |
 | `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via tray menu → **Vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
+| `plugins_enabled` | `true` | Run [plugins](#plugins) — a phrase you say and what happens when you say it |
+| `plugin_actions_enabled` | `true` | Let plugins do things as well as rewrite text. `false` keeps their text changes and stops anything reaching outside PyWhispr |
+| `plugins` | `{}` | Per-plugin settings, e.g. `[plugins.emoji]` with `enabled = false` |
 | `api_enabled` | `true` | Serve the [network API](#network-api) |
 | `api_host` | `0.0.0.0` | Bind address — set to `127.0.0.1` to keep it on this machine |
 | `api_port` | `9149` | Listening port |
@@ -249,6 +252,90 @@ not a hint to the model — nothing in Parakeet's decoder takes a word list — 
 term the model didn't hear at all can only be recovered with an explicit
 `heard => wanted` line. The file lives next to `config.toml` as `vocabulary.txt`
 and is never written to the log, only its term count.
+
+## Plugins
+
+A plugin is a phrase you say and something that happens when you say it. One
+ships with PyWhispr:
+
+> "That fixed it **thumbs up emoji**" → *That fixed it 👍*
+
+The words in front of `emoji` are looked up — the ~220 names people actually use,
+then every emoji name Unicode knows — and the whole lot becomes one character.
+Chain them and they all convert: *"man emoji gun emoji"* → 👨 🔫.
+
+Say something that names no emoji and nothing happens at all: *"send me an
+emoji"* is left exactly as you said it. A request also has to either end a clause
+or lead a chain, so *"the fire emoji is best"* stays a sentence about an emoji
+rather than becoming a request for one.
+
+The punctuation the model invents around it is taken back off: every transcript
+arrives with a full stop appended and a comma wherever the model heard your pause,
+so *"hello smile emoji"* is transcribed *"Hello, smile emoji."* and would otherwise
+paste as *Hello, 🙂.* — you get *Hello 🙂*. That matters beyond looks: Teams and
+Slack only render the big version when the message is nothing but emoji. A `!` or
+`?` is yours and stays, and a comma doing real work (*"hello, smile emoji, then I
+left"*) is left alone.
+
+### Writing one
+
+Tray menu → **Open plugins folder…**, drop in a `.py` file, restart. A plugin is
+a module with a `TRIGGERS` list and either or both of two functions:
+
+```python
+from pywhispr.plugins.api import Match, Rewrite, Trigger
+
+NAME = "temperature"
+TRIGGERS = (Trigger(phrase="temperature", at_segment_end=True),)
+
+def rewrite(match: Match) -> Rewrite | None:
+    """Change the text. Say "twenty five degrees temperature" → "25 C"."""
+    if not match.words_before:
+        return None
+    number = match.words_before[-1].text
+    if not number.isdigit():
+        return None                      # not for us: leave the transcript alone
+    return match.claim_from(match.words_before[-1], f"{number} C")
+
+def act(match: Match) -> None:
+    """Do something. Runs on its own thread, after the text has been inserted."""
+```
+
+`rewrite` says which span of the transcript it claims and what should replace it
+— it never returns a whole transcript, because PyWhispr does the splicing. That's
+what makes plugins safe to have: text outside a claimed span cannot be disturbed,
+a claim is confined to the words the plugin was shown, and an exception, a bad
+span or an oversized replacement means that one match is skipped and the
+transcript survives untouched. It runs between transcription and paste, so it
+must be quick and must not do I/O — that's what `act` is for.
+
+Returning `None` is how a plugin says *those words weren't meant for me*, and it
+is the main guard against firing on ordinary speech. A plugin with a `rewrite`
+only gets its `act` when that rewrite claimed something.
+
+### Limits worth knowing
+
+- **A plugin can only change the dictation being inserted now**, not text already
+  in the document. PyWhispr never sends Backspace to another application, so
+  "thumbs up" and "emoji" have to be in the same dictation.
+- **Actions never run for [network API](#network-api) requests.** That port has no
+  authentication, so anything able to reach it could otherwise trigger local side
+  effects by choosing its words. Rewrites do apply there.
+- **A plugin is arbitrary Python**, run at every startup with your privileges —
+  the same trust as your shell profile. Read what you install. PyWhispr never
+  downloads one.
+- Under the packaged app a plugin may import the standard library and `pywhispr`;
+  third-party packages aren't in the bundle.
+- Plugins load at startup. There's no reload, because a plugin that started a
+  thread can't be un-imported.
+
+`plugins_enabled = false` turns the lot off; `plugin_actions_enabled = false`
+keeps rewrites but stops anything reaching outside PyWhispr; and one at a time:
+
+```toml
+[plugins.emoji]
+enabled = false
+```
 
 ## Network API
 
