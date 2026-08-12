@@ -49,6 +49,7 @@ class TrayIcon(QSystemTrayIcon):
         on_toggle=None,
         on_change_hotkey=None,
         on_edit_vocabulary=None,
+        on_open_plugins=None,
         on_enable_gpu=None,
         on_disable_gpu=None,
         gpu_active=None,
@@ -85,6 +86,12 @@ class TrayIcon(QSystemTrayIcon):
             vocabulary = QAction("Vocabulary…", menu)
             vocabulary.triggered.connect(on_edit_vocabulary)
             menu.addAction(vocabulary)
+        if on_open_plugins is not None:
+            # Opens the folder rather than managing anything: plugins are files,
+            # they load at startup, and nothing here ever installs one.
+            plugins = QAction("Open plugins folder…", menu)
+            plugins.triggered.connect(on_open_plugins)
+            menu.addAction(plugins)
         if on_set_server is not None:
             # Lite only: where transcription is sent. Provided by the app only in
             # the Lite build, so the full app's menu is unchanged.
@@ -156,16 +163,18 @@ class TrayIcon(QSystemTrayIcon):
         self.setIcon(self._active_icon if active else self._idle_icon)
 
     def _open_config(self) -> None:
-        self._open(config_path())
+        self.open_path(config_path())
 
     def _open_log(self) -> None:
         path = log_path()
         # Nothing has been logged yet if the file could not be created; opening
         # the folder at least shows the user where to look.
-        self._open(path if path.exists() else path.parent)
+        self.open_path(path if path.exists() else path.parent)
 
     @staticmethod
-    def _open(path) -> None:
+    def open_path(path) -> None:
+        """Hand a file or folder to the desktop. Public: the app opens the plugins
+        folder through it, having had to create the folder first."""
         from PySide6.QtGui import QDesktopServices
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))

@@ -6,6 +6,8 @@ import pytest
 
 from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
+from pywhispr.plugins.api import Trigger
+from pywhispr.plugins.engine import Plugin, compile_patterns
 from pywhispr.scratch import compile_reset_phrases
 from pywhispr.vocab import parse_vocabulary
 
@@ -27,6 +29,9 @@ def isolated_app(**config_kwargs):
         # Never read the developer's own vocabulary file: tests that assert on
         # exact transcripts would then depend on what is in it.
         patch("pywhispr.app.load_vocabulary", return_value=[]),
+        # Nor their plugins folder, for the same reason — and a plugin of theirs
+        # with an act() would otherwise really run during the suite.
+        patch("pywhispr.app.load_plugins", return_value=[]),
         # Nothing here should claim a real system-wide hotkey. A fresh mock per
         # call, so the dictation and recall listeners are told apart.
         patch("pywhispr.app.create_hotkey_listener", side_effect=lambda *a, **k: MagicMock()),
@@ -345,6 +350,147 @@ class TestFillerRemoval:
         app._test_backend.transcribe.return_value = "Um, hello from over there."
         audio = np.zeros(16000, dtype=np.float32)
         assert app._api_transcribe(audio) == "Hello from over there."
+
+
+class TestPlugins:
+    """Where the plugin pass sits, and when a plugin's action is allowed to run."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()
+            wait_for_worker(app, qtbot)
+        return insert
+
+    @staticmethod
+    def _plugin(name="test", phrase="marker", rewrite=None, act=None):
+        triggers = (Trigger(phrase=phrase),)
+        return Plugin(
+            name=name,
+            triggers=triggers,
+            rewrite=rewrite,
+            act=act,
+            patterns=compile_patterns(triggers),
+        )
+
+    @staticmethod
+    def _shout(match):
+        """Claims the trigger and the word before it, replacing both with "!"."""
+        if not match.words_before:
+            return None
+        return match.claim_from(match.words_before[-1], "!")
+
+    def test_a_rewrite_reaches_the_injector(self, app, qtbot):
+        app._plugins = [self._plugin(rewrite=self._shout)]
+        insert = self._dictate(app, qtbot, "Here we go marker.")
+        insert.assert_called_once_with("Here we !.")
+
+    def test_runs_after_the_vocabulary(self, app, qtbot):
+        """A trigger has to see the corrected spelling, or it cannot match it."""
+        app._vocab = parse_vocabulary("marker")
+        app._plugins = [self._plugin(rewrite=self._shout)]
+        insert = self._dictate(app, qtbot, "Here we go MARKER.")
+        insert.assert_called_once_with("Here we !.")
+
+    def test_runs_before_the_join(self, app, qtbot):
+        """The join decides about the opening word, so it must see the final one."""
+        app.cfg.join_continuations = True
+        app._plugins = [
+            self._plugin(rewrite=lambda match: match.claim(match.start, match.end, "and"))
+        ]
+        with patch.object(app._context, "preceding_text", return_value="I went out"):
+            insert = self._dictate(app, qtbot, "Marker then I came home.")
+        # "Marker" became "and", and the join lower-cased *that* word.
+        insert.assert_called_once_with(" and then I came home.")
+
+    def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
+        app._plugins = [self._plugin(rewrite=self._shout)]
+        with patch("pywhispr.app.apply_plugins", side_effect=RuntimeError("boom")):
+            insert = self._dictate(app, qtbot, "Here we go marker.")
+        insert.assert_called_once_with("Here we go marker.")
+
+    def test_an_action_waits_for_the_insertion(self, app, qtbot):
+        """An action that types or switches window must not race the paste."""
+        app._plugins = [self._plugin(rewrite=self._shout, act=lambda match: None)]
+        app._actions = MagicMock()
+        self._dictate(app, qtbot, "Here we go marker.")
+        app._actions.dispatch.assert_not_called()
+        assert len(app._pending_actions) == 1
+
+        app.injector.finished.emit(True)
+        app._actions.dispatch.assert_called_once()
+        assert app._pending_actions == ()
+
+    def test_an_action_runs_in_clipboard_mode_too(self, app, qtbot):
+        app._plugins = [self._plugin(rewrite=self._shout, act=lambda match: None)]
+        app._actions = MagicMock()
+        self._dictate(app, qtbot, "Here we go marker.")
+        app.injector.finished.emit(False)  # copied, not pasted
+        app._actions.dispatch.assert_called_once()
+
+    def test_a_recall_does_not_fire_the_action_again(self, app, qtbot):
+        app._plugins = [self._plugin(rewrite=self._shout, act=lambda match: None)]
+        app._actions = MagicMock()
+        self._dictate(app, qtbot, "Here we go marker.")
+        app.injector.finished.emit(True)
+        app._actions.dispatch.reset_mock()
+
+        # The history picker comes back through the same signal.
+        app.injector.finished.emit(True)
+        app._actions.dispatch.assert_not_called()
+
+    def test_actions_switched_off_still_rewrites(self, app, qtbot):
+        app._plugins = [self._plugin(rewrite=self._shout, act=lambda match: None)]
+        app._actions = None  # what cfg.plugin_actions_enabled = false builds
+        insert = self._dictate(app, qtbot, "Here we go marker.")
+        insert.assert_called_once_with("Here we !.")
+        app.injector.finished.emit(True)
+        assert app._pending_actions == ()
+
+    def test_a_command_only_dictation_inserts_nothing_but_still_acts(self, app, qtbot):
+        """The whole transcript was the command, punctuation included."""
+        consume = lambda match: match.claim(match.window_start, match.window_end, "")  # noqa: E731
+        app._plugins = [self._plugin(phrase="new paragraph", rewrite=consume, act=lambda m: None)]
+        app._actions = MagicMock()
+        insert = self._dictate(app, qtbot, "New paragraph.")
+        insert.assert_not_called()
+        app._actions.dispatch.assert_called_once()
+        assert app.state == State.IDLE
+        assert list(app._history) == []  # nothing worth recalling
+
+    def test_a_failed_transcription_runs_nothing(self, app):
+        app._pending_actions = ("pretend",)
+        app._on_transcribe_failed("RuntimeError: no")
+        assert app._pending_actions == ()
+
+    class TestTheNetworkApi:
+        """The API port is open to the LAN with no authentication."""
+
+        def test_gets_the_rewrites(self, app):
+            app._plugins = [TestPlugins._plugin(rewrite=TestPlugins._shout)]
+            app._test_backend.transcribe.return_value = "Here we go marker."
+            assert app._api_transcribe(np.zeros(16000, dtype=np.float32)) == "Here we !."
+
+        # Note: there is deliberately no test here driving _api_transcribe from a
+        # real thread to prove the pass runs off the GUI thread. It livelocks the
+        # suite: unittest.mock is not thread-safe, and reaching the fixture's mocks
+        # from a second thread wedges a *later* test whose main thread and STT
+        # worker both build child mocks. The half of that constraint worth checking
+        # is that the engine is reentrant, and test_plugins.py does it with no app,
+        # no Qt and no mocks in the way.
+
+        def test_never_gets_the_actions(self, app):
+            """Otherwise anything that can reach the port can run local code."""
+            app._plugins = [
+                TestPlugins._plugin(rewrite=TestPlugins._shout, act=lambda match: None)
+            ]
+            app._actions = MagicMock()
+            app._test_backend.transcribe.return_value = "Here we go marker."
+            app._api_transcribe(np.zeros(16000, dtype=np.float32))
+            assert app._pending_actions == ()
+            app._actions.dispatch.assert_not_called()
 
 
 class TestModelLoadFailure:

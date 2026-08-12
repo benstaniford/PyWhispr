@@ -26,6 +26,9 @@ from pywhispr.injector import TextInjector
 from pywhispr.join import join_text
 from pywhispr.logging_setup import log_environment, log_path
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
+from pywhispr.plugins.actions import ActionRunner
+from pywhispr.plugins.engine import PendingAction, apply_plugins
+from pywhispr.plugins.registry import load_plugins
 from pywhispr.scratch import compile_reset_phrases, is_suffix_of, strip_before_reset
 from pywhispr.stt import create_backend
 from pywhispr.stt.base import SAMPLE_RATE
@@ -91,6 +94,7 @@ class PyWhisprApp(QObject):
             on_toggle=self._hotkey_toggled.emit,
             on_change_hotkey=self._change_hotkey,
             on_edit_vocabulary=self._edit_vocabulary,
+            on_open_plugins=self._open_plugins_folder if cfg.plugins_enabled else None,
             on_enable_gpu=self._enable_gpu if gpu_possible else None,
             on_disable_gpu=self._disable_gpu if gpu_possible else None,
             gpu_active=self._gpu_active if gpu_possible else None,
@@ -106,6 +110,18 @@ class PyWhisprApp(QObject):
         # Rebound wholesale (never mutated) when the editor saves, so the API's
         # request threads can read it without a lock.
         self._vocab: list[Rule] = load_vocabulary()
+        # Loaded once and never rebound, so the API's request threads can read it
+        # without a lock either. Plugins cannot be reloaded — see registry.py.
+        self._plugins = load_plugins(cfg)
+        # Only built where something could actually use it. A plugin's actions are
+        # the half that reaches outside PyWhispr, so they have their own switch.
+        self._actions = (
+            ActionRunner()
+            if cfg.plugin_actions_enabled and any(p.act is not None for p in self._plugins)
+            else None
+        )
+        # Filled by the plugin pass, drained once the text has been inserted.
+        self._pending_actions: tuple[PendingAction, ...] = ()
         self._fillers = filler_words(cfg.extra_filler_words, cfg.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(cfg.voice_reset_phrases)
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
@@ -471,6 +487,8 @@ class PyWhisprApp(QObject):
             # leave the user's other apps quiet for good.
             self.ducker.restore()
         self._worker.shutdown(wait=False)
+        if self._actions is not None:
+            self._actions.stop()
         QApplication.quit()
 
     def _report_error(self, title: str, message: str) -> None:
@@ -536,11 +554,18 @@ class PyWhisprApp(QObject):
         which has a caret to join onto. A remote caller has neither that nor
         any session. Filler removal and the vocabulary do apply, because they
         are standing preferences about the text rather than session state.
+
+        Plugins apply too, but only their rewrites — never their actions. This
+        port is open to the LAN with no authentication (see ``config.api_host``),
+        so anything that can reach it can choose the words that arrive here; a
+        plugin's side effects must not be one keyword away from that. Nothing is
+        stored on ``self`` either, since this runs on a request thread.
         """
         text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
-        return self._corrected(self._cleaned(self._after_reset(text)))
+        corrected = self._corrected(self._cleaned(self._after_reset(text)))
+        return self._via_plugins(corrected, collect_actions=False)
 
     # -- state transitions (main thread only) --------------------------------
 
@@ -787,9 +812,16 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        # Vocabulary next: it can change the opening word, which is the word
-        # the join then decides about.
-        corrected = self._corrected(text)
+        # Vocabulary, then plugins: each can change the opening word, and the join
+        # decides about whatever the last of them leaves there.
+        corrected = self._via_plugins(self._corrected(text))
+        if not corrected.strip():
+            # A dictation that was nothing but a command. There is no text to
+            # paste and none worth remembering, but the action still runs.
+            log.info("Plugins consumed the whole transcript; nothing to insert")
+            self._run_pending_actions()
+            self._finish_cycle()
+            return
         # Remembered before the join, and whatever the insertion does next: the
         # join belongs to the caret this transcript was aimed at, and a paste
         # that went to the wrong window is exactly what the history is for.
@@ -867,6 +899,48 @@ class PyWhisprApp(QObject):
             return text
         return corrected
 
+    def _via_plugins(self, text: str, *, collect_actions: bool = True) -> str:
+        """Let the plugins rewrite the transcript, degrading to it untouched.
+
+        Wrapped like ``_corrected`` and ``_joined``, for the same reason: the audio
+        is gone by now. There is no length tripwire here because it would be the
+        wrong instrument — "thumbs up emoji" legitimately becomes one character.
+        The invariant lives in the engine instead, and is stronger: it splices
+        untouched slices of this text around spans it has validated, so text
+        outside a claim cannot be disturbed however a plugin misbehaves. What is
+        left to catch here is the engine itself failing.
+
+        ``collect_actions=False`` for callers with no dictation cycle to run them
+        in — the network API — which also keeps this off ``self`` for a request
+        thread.
+        """
+        if not text or not self._plugins:
+            return text
+        try:
+            result = apply_plugins(text, self._plugins)
+        except Exception:
+            log.exception("Plugin pass failed; using the transcript as it was")
+            return text
+        if collect_actions:
+            self._pending_actions = result.actions
+        return result.text
+
+    def _run_pending_actions(self) -> None:
+        """Hand the queued plugin actions to their own thread, the text now placed.
+
+        Never before the insertion: an action that types something, switches window
+        or reads the clipboard needs the transcript already where it belongs.
+        Drained as it goes, so a recall from the history picker — which comes back
+        through the same ``_on_insert_finished`` — cannot fire them a second time.
+        """
+        pending, self._pending_actions = self._pending_actions, ()
+        if not pending:
+            return
+        if self._actions is None:
+            log.debug("Discarding %d plugin action(s): actions are off", len(pending))
+            return
+        self._actions.dispatch(pending)
+
     def _joined(self, text: str) -> str:
         """Adapt the transcript to what precedes the caret.
 
@@ -914,10 +988,14 @@ class PyWhisprApp(QObject):
             self.tray.notify(
                 "Copied to clipboard", f"Press {paste_key} to paste your dictation."
             )
+        # Whether or not it auto-pasted: the user has their text either way, and a
+        # plugin's action is about what was said rather than where it landed.
+        self._run_pending_actions()
         self._finish_cycle()
 
     def _finish_cycle(self) -> None:
         self._last_inserted = None
+        self._pending_actions = ()  # a cycle that ended another way runs nothing
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)
         self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
@@ -1039,6 +1117,23 @@ class PyWhisprApp(QObject):
             self.tray.notify("Vocabulary not saved", str(exc))
         finally:
             self._resume_listeners()
+
+    def _open_plugins_folder(self) -> None:
+        """Tray menu: show the plugins folder, creating it and its README if needed.
+
+        No dialog and no reload. A plugin is a file, it is read at startup, and
+        saying so plainly beats a manager window that cannot honestly offer to
+        apply a change in this process — see registry.py.
+        """
+        from pywhispr.plugins.registry import ensure_plugins_dir
+
+        try:
+            directory = ensure_plugins_dir()
+        except OSError as exc:
+            log.exception("Could not create the plugins folder")
+            self.tray.notify("Plugins folder unavailable", str(exc))
+            return
+        self.tray.open_path(directory)
 
     def _check_double_tap_permission(self, chord: str) -> None:
         """Double-tap hotkeys need Input Monitoring on macOS; guide the user."""
