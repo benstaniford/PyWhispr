@@ -37,13 +37,16 @@ def test_uses_the_system_trust_store(no_ca_env, fake_truststore):
 
 
 @pytest.mark.parametrize("var", certs.CA_BUNDLE_ENV_VARS)
-def test_an_explicit_ca_bundle_wins(no_ca_env, fake_truststore, monkeypatch, var, tmp_path):
-    """A user who configured certs deliberately keeps the behaviour they set up."""
+def test_an_explicit_ca_bundle_does_not_stop_the_injection(
+    no_ca_env, fake_truststore, monkeypatch, var, tmp_path
+):
+    """A bundle naming one corporate CA and no public roots broke every download."""
     monkeypatch.setenv(var, str(tmp_path / "ca-bundle.pem"))
 
     status = certs.use_system_certificates()
 
-    assert fake_truststore == []
+    assert fake_truststore == ["injected"]
+    assert "system trust store" in status
     assert var in status
 
 

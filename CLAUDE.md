@@ -23,8 +23,11 @@ STT backends take in-memory numpy audio, so they're testable without a mic.
   for a hand-built CA bundle if that fails — and note **which var matters
   depends on the stack**: `httpx` (what `huggingface_hub` downloads with) reads
   `SSL_CERT_FILE` and ignores `REQUESTS_CA_BUNDLE`; `requests` is the reverse.
-  Setting either makes `certs.py` stand aside. Once the model is cached, normal
-  runs work offline.
+  Injection is unconditional — `certs.py` used to stand aside when either was
+  set, and a `SSL_CERT_FILE` naming one corporate `.cer` (no public roots) then
+  failed every download the moment `huggingface_hub` 1.x swapped `requests` for
+  `httpx`. truststore keeps such a bundle usable as a fallback anyway. Once the
+  model is cached, normal runs work offline.
 - **Python 3.12**, not newer: `parakeet-mlx` → `librosa`/`numba` need a numpy
   the newest CPython lacks wheels for. `pyproject.toml` caps `<3.14` and pins
   `numba>=0.61` to stop bad backtracking.

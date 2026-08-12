@@ -408,9 +408,8 @@ tls verification: system trust store (truststore)
 ```
 
 That covers the normal case, where the CA is installed machine-wide (it has to
-be, or browsers on the machine would fail too). To override it — an unusual CA
-that isn't in the system store, or verification you want to pin explicitly —
-set a CA bundle and PyWhispr will leave verification alone:
+be, or browsers on the machine would fail too). For a CA that is *not* in the
+system store, add a bundle as well:
 
 ```sh
 export SSL_CERT_FILE=/path/to/ca-bundle.pem REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem
@@ -418,7 +417,10 @@ export SSL_CERT_FILE=/path/to/ca-bundle.pem REQUESTS_CA_BUNDLE=/path/to/ca-bundl
 
 Set both: they cover different HTTP stacks. `SSL_CERT_FILE` is read by Python's
 `ssl` module and so covers `httpx`, which is what `huggingface_hub` downloads
-with; `REQUESTS_CA_BUNDLE` is honoured only by `requests`.
+with; `REQUESTS_CA_BUNDLE` is honoured only by `requests`. Either way the system
+store is still used first, so a bundle holding one corporate CA and none of the
+public roots — which is what these variables usually end up pointing at — no
+longer breaks downloads.
 
 For `uv` itself, use `export UV_SYSTEM_CERTS=1` — that's a separate Rust/rustls
 path which the above doesn't affect.
