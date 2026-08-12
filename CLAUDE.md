@@ -202,12 +202,18 @@ opening word that join then decides about.
   whole thing. The window stretches over punctuation only on a side with *no*
   context word — without that, a command-only plugin ("new paragraph") cannot
   reach the full stop the model put after it and leaves a lone `.` behind.
-- **Two phases, split on purpose.** `rewrite` is synchronous on the GUI thread
-  inside the pass; `act` runs on its own single thread from
-  `_on_insert_finished`. That ordering is the point: an action that types, switches
-  window or reads the clipboard has to happen *after* the paste. One thread, not a
-  pool, so two plugins cannot fight over the keyboard, and never the STT worker,
-  or a slow plugin would delay the next dictation.
+- **Two phases, split on purpose.** `rewrite` is synchronous inside the pass; `act`
+  runs on its own single thread from `_on_insert_finished`. That ordering is the
+  point: an action that types, switches window or reads the clipboard has to happen
+  *after* the paste. One thread, not a pool, so two plugins cannot fight over the
+  keyboard, and never the STT worker, or a slow plugin would delay the next
+  dictation.
+- **`rewrite` is not GUI-thread-only, so it must be reentrant.** `_api_transcribe`
+  runs the pass on its own HTTP request thread — `api.py` is a `ThreadingHTTPServer`
+  with `api_max_queue` in flight — so a rewrite can run in several threads at once
+  and alongside a local dictation's GUI-thread call. Hence "a pure function of its
+  `Match`" in the docs is a requirement, not a style preference: no Qt, no shared
+  mutable state. (Caught in review; the docs previously promised the GUI thread.)
 - **`_api_transcribe` gets rewrites and never actions.** `api_host` defaults to
   `0.0.0.0` with no authentication, so anything that can reach the port chooses the
   words that arrive; side effects must not be one keyword away from that. Enforced
@@ -262,6 +268,16 @@ opening word that join then decides about.
 - Testing gotcha: `isolated_app` patches `load_plugins` as well as
   `load_vocabulary`. Without it the suite loads the *developer's* plugins folder,
   and a plugin of theirs with an `act()` would really run.
+- Testing gotcha: **do not drive app code from a second thread in `test_app.py`.**
+  `unittest.mock` is not thread-safe, so reaching the fixture's mocks off the main
+  thread wedges a *later* test whose main thread and STT worker both build child
+  mocks — both ended up inside `mock.__getattr__`/`_get_child_mock` and the suite
+  hung, deterministically but nowhere near the offending test. Swapping in a
+  non-mock backend was not enough; the test had to go. Concurrency belongs in
+  `test_plugins.py::TestReentrancy`, which uses the pure engine and no Qt or mocks.
+  Diagnosing this needs `PYTHONUNBUFFERED=1` (a `>` redirect block-buffers, so the
+  reported test is thousands of lines stale) plus `-o faulthandler_timeout=25` for
+  the thread dump.
 
 ## GPU acceleration (`gpu.py` + `cuda.py` + `directml.py`)
 

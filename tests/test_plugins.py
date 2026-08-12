@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import pytest
 
@@ -284,6 +285,58 @@ class TestActionRunner:
         plugin = make_plugin(act=lambda match: None)
         runner.stop()
         assert runner.dispatch([PendingAction(plugin, Match("marker", 0, 6))]) == 0
+
+
+class TestReentrancy:
+    """A rewrite does not get the GUI thread to itself, so the engine must be safe
+    to call from several at once.
+
+    ``app._api_transcribe`` runs the pass on the HTTP request thread that asked for
+    it, and ``api.py`` is a ThreadingHTTPServer with ``api_max_queue`` requests in
+    flight — so a rewrite can be running in several threads, and alongside a local
+    dictation's own call. Pure Python here on purpose: no app, no Qt, no mocks.
+    """
+
+    def test_concurrent_callers_all_get_their_own_answer(self):
+        plugin = make_plugin(rewrite=claim_all("X"))
+        # The distinguishing number sits *after* the trigger, where the claim does
+        # not reach: claim_all swallows the word in front of it, so "number 7 marker"
+        # would give every thread the same answer and prove nothing.
+        texts = [f"keep marker tail {n}" for n in range(60)]
+        results: dict[int, str] = {}
+
+        def run(index: int) -> None:
+            results[index] = apply_plugins(texts[index], [plugin]).text
+
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(len(texts))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert results == {i: f"X tail {i}" for i in range(len(texts))}
+
+    def test_a_plugin_sees_only_its_own_match(self):
+        """Nothing is carried between calls, so interleaving cannot cross the wires."""
+        seen: list[tuple[str, str]] = []
+
+        def rewrite(match: Match) -> Rewrite | None:
+            seen.append((match.transcript, match.trigger_text))
+            return None
+
+        plugin = make_plugin(rewrite=rewrite)
+        threads = [
+            threading.Thread(target=apply_plugins, args=(f"{n} marker", [plugin]))
+            for n in range(40)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert len(seen) == 40
+        assert all(trigger == "marker" and trigger in transcript for transcript, trigger in seen)
 
 
 class TestRegistry:

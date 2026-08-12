@@ -53,7 +53,7 @@ _WORD = re.compile(r"\w+(?:['’\-]\w+)*")
 # magnitude and exists only to stop a looping plugin from producing a megabyte.
 MAX_REPLACEMENT_CHARS = 4096
 
-# A rewrite runs on the GUI thread between transcription and paste, so it has a
+# On the local path a rewrite sits between transcription and the paste, so it has a
 # hard budget in principle and only a warning in practice: enforcing it would
 # need a subprocess per plugin, which is a far bigger machine than the problem.
 SLOW_REWRITE_MS = 50
@@ -269,8 +269,8 @@ def _rewrite_of(plugin: Plugin, match: Match) -> Rewrite | None:
     elapsed_ms = (time.perf_counter() - started) * 1000
     if elapsed_ms > SLOW_REWRITE_MS:
         log.warning(
-            "Plugin %r took %.0fms to rewrite — that runs on the GUI thread, "
-            "so heavy work belongs in act()",
+            "Plugin %r took %.0fms to rewrite — a local dictation waits on that "
+            "before it can paste, so heavy work belongs in act()",
             plugin.name,
             elapsed_ms,
         )

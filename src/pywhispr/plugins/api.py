@@ -8,11 +8,20 @@ A plugin declares one or more :class:`Trigger` phrases and implements either or
 both of two functions, which are two very different jobs:
 
 ``rewrite(match) -> Rewrite | None``
-    Change the text. Runs on the GUI thread inside the transcript pipeline, so it
-    must be quick and must not do I/O. It says which span of the transcript it
-    claims and what should replace it — it never returns a whole new transcript,
-    because the *framework* does the splicing (see :mod:`pywhispr.plugins.engine`)
-    and text outside a claimed span therefore cannot be disturbed.
+    Change the text. It says which span of the transcript it claims and what should
+    replace it — it never returns a whole new transcript, because the *framework*
+    does the splicing (see :mod:`pywhispr.plugins.engine`) and text outside a
+    claimed span therefore cannot be disturbed.
+
+    **Runs on whichever thread is handling the transcript**, and there is more than
+    one: the GUI thread for a local dictation, or an HTTP request thread for a
+    network transcription (``app._api_transcribe``). The API server runs up to
+    ``api_max_queue`` requests at once, so a rewrite may also be running in another
+    thread — including alongside a local dictation. So it must be **reentrant** and
+    must **not touch Qt or any UI**, and it must be quick, because on the local
+    path it sits between transcription and the paste. A pure function of its
+    ``Match`` satisfies all three; anything else is asking for trouble, and heavy
+    or stateful work belongs in ``act``.
 
 ``act(match) -> None``
     Do something. Runs on its own thread once the text has been inserted, so it

@@ -473,6 +473,14 @@ class TestPlugins:
             app._test_backend.transcribe.return_value = "Here we go marker."
             assert app._api_transcribe(np.zeros(16000, dtype=np.float32)) == "Here we !."
 
+        # Note: there is deliberately no test here driving _api_transcribe from a
+        # real thread to prove the pass runs off the GUI thread. It livelocks the
+        # suite: unittest.mock is not thread-safe, and reaching the fixture's mocks
+        # from a second thread wedges a *later* test whose main thread and STT
+        # worker both build child mocks. The half of that constraint worth checking
+        # is that the engine is reentrant, and test_plugins.py does it with no app,
+        # no Qt and no mocks in the way.
+
         def test_never_gets_the_actions(self, app):
             """Otherwise anything that can reach the port can run local code."""
             app._plugins = [

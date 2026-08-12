@@ -165,7 +165,11 @@ def load_plugins(cfg: Config) -> list[Plugin]:
         files = []
     for path in files:
         if path.name.startswith("_"):
-            continue  # _helpers.py and friends are imports, not plugins
+            # Reserved, and not importable either: this folder is deliberately kept
+            # off sys.path, because a file in it called types.py or logging.py would
+            # shadow the standard library for the whole application. A plugin is one
+            # self-contained file — see the note in README.
+            continue
         if not _is_enabled(cfg, path.stem):
             log.debug("Plugin %r is disabled in the config", path.stem)
             continue
@@ -197,9 +201,13 @@ TRIGGERS list and either or both of two functions:
     rewrite(match) -> Rewrite | None    change the text
     act(match) -> None                  do something
 
-rewrite() runs between transcription and paste, on the GUI thread, so it must be
-quick and must not do I/O. act() runs on its own thread once the text has been
-inserted, so it may take as long as it likes.
+rewrite() must be quick and must not do I/O: a dictation is waiting on it before
+it can paste. It also runs on more than one thread — the user interface thread for
+a dictation, an HTTP request thread for a transcription that arrived over the
+network API, possibly several at once — so it must not touch any UI, and two calls
+must not tread on each other. Write it as a pure function of its Match and all of
+that comes free. act() runs on its own thread once the text has been inserted, so
+it may take as long as it likes.
 
 Returning None from rewrite() means "those words were not meant for me", and the
 transcript is left exactly as it was. A plugin with a rewrite only gets its act()
@@ -223,6 +231,10 @@ A worked example — say "twenty five degrees temperature" and get "25 C":
 Notes
 -----
 
+* A plugin is one self-contained file. This folder is deliberately not on
+  sys.path, so you cannot split one across files and `import` the other half — a
+  file in here called types.py or logging.py would shadow the standard library for
+  the whole application. Files starting with _ are skipped, not importable.
 * You cannot change text from an earlier dictation, only the transcript being
   inserted now. PyWhispr never sends Backspace to another application.
 * A claim is limited to the words in match.words_before / match.words_after.

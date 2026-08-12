@@ -309,6 +309,12 @@ span or an oversized replacement means that one match is skipped and the
 transcript survives untouched. It runs between transcription and paste, so it
 must be quick and must not do I/O — that's what `act` is for.
 
+Write `rewrite` as a pure function of its `Match`. It runs on more than one thread
+— the UI thread for a dictation, an HTTP request thread for a [network
+API](#network-api) transcription, possibly several at once — so it must not touch
+any UI and two calls must not tread on each other. `act` has the opposite deal: its
+own thread, one at a time, after the text has landed, so it can take its time.
+
 Returning `None` is how a plugin says *those words weren't meant for me*, and it
 is the main guard against firing on ordinary speech. A plugin with a `rewrite`
 only gets its `act` when that rewrite claimed something.
