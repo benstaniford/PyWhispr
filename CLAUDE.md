@@ -110,6 +110,25 @@ preference lives on the page. `tray.py` keeps `open_config`/`open_log` because
   that the default is the wrong one, so a silent fallback is the bug. The page
   keeps an unplugged choice in the list, marked, or opening settings would reset
   it just by being opened.
+- **PortAudio lists every microphone once per host API**, so on Windows three mics
+  arrived as ~17 indistinguishable rows plus MME's "Microsoft Sound Mapper - Input"
+  and DirectSound's "Primary Sound Capture Driver" (each host API's own
+  "the default" pseudo-device — the page already offers that itself). The fix is to
+  *show* one host API (`audio.input_devices`), not to de-duplicate by name: two
+  genuinely different devices can share a name and name-matching would hide one.
+- **That host API is DirectSound, not WASAPI.** WASAPI is the modern one and the
+  obvious choice, and it cannot be used: it is shared-mode here and will not
+  resample, so opening our 16 kHz stream on it fails outright with
+  `Invalid sample rate [PaErrorCode -9997]`, and WDM-KS answers
+  `Blocking API not supported yet`. MME records but truncates every name at 31
+  characters (`Microphone (Logitech PRO X Wire`). Measure before changing this — a
+  list that looks right and cannot record is worse than duplicates.
+- **Resolution deliberately sees more than the list does.** `find_device` tries the
+  shown devices, then *every* device (`audio.all_input_devices`), then a name MME
+  truncated as an unambiguous prefix — a config written before the list was
+  narrowed must not strand. Ambiguous prefixes resolve to nothing rather than to a
+  coin toss. `display_name` maps such a stored name onto the row that is shown, or
+  the page would mark a working microphone "not connected".
 
 ## Transcript recall (`history.py` + `ui/history_dialog.py`)
 

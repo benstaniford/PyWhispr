@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from pywhispr import flavor
-from pywhispr.audio import input_devices
+from pywhispr.audio import all_input_devices, display_name, input_devices
 from pywhispr.config import Config
 
 log = logging.getLogger(__name__)
@@ -298,12 +298,12 @@ class SettingsDialog(QDialog):
         """The configured microphone by name, resolving a legacy index if that is
         all the config has."""
         if self.config.input_device_name:
-            return self.config.input_device_name
+            return display_name(self.config.input_device_name)
         if self.config.input_device is None:
             return None
-        for index, name in input_devices():
+        for index, name in all_input_devices():
             if index == self.config.input_device:
-                return name
+                return display_name(name)
         return None
 
     def _change_hotkey(self) -> None:

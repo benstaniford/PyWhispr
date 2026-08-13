@@ -86,13 +86,157 @@ class TestDeviceLookup:
             assert input_devices() == []
 
     def test_find_device_returns_the_current_index(self):
-        with patch("pywhispr.audio.input_devices", return_value=[(0, "Array"), (3, "Yeti")]):
+        with self._lists(shown=[(0, "Array"), (3, "Yeti")]):
             from pywhispr.audio import find_device
 
             assert find_device("Yeti") == 3
 
     def test_an_absent_device_is_none_rather_than_a_guess(self):
-        with patch("pywhispr.audio.input_devices", return_value=[(0, "Array")]):
+        with self._lists(shown=[(0, "Array")]):
             from pywhispr.audio import find_device
 
             assert find_device("Yeti") is None
+
+    def _lists(self, shown, every=None):
+        """Patch both device lists — leaving one real makes the test depend on
+        whatever microphones the machine running it happens to have."""
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch("pywhispr.audio.input_devices", return_value=shown))
+        stack.enter_context(
+            patch("pywhispr.audio.all_input_devices", return_value=every if every else shown)
+        )
+        return stack
+
+
+class TestOneEntryPerDevice:
+    """PortAudio lists every microphone once per Windows host API, so the shown
+    list is one host API's worth — see PREFERRED_HOST_API."""
+
+    HOST_APIS = ["MME", "Windows DirectSound", "Windows WASAPI", "Windows WDM-KS"]
+    DEVICES = [
+        ("Microsoft Sound Mapper - Input", 2, 0),
+        ("Microphone (Logitech PRO X Wire", 1, 0),  # MME truncates at 31 characters
+        ("Primary Sound Capture Driver", 2, 1),
+        ("Microphone (Logitech PRO X Wireless Gaming Headset)", 1, 1),
+        ("Microphone (Logitech BRIO)", 2, 1),
+        ("Microphone (Logitech PRO X Wireless Gaming Headset)", 1, 2),
+        ("Microphone (PRO X Wireless Gaming Headset)", 1, 3),
+    ]
+
+    def _sounddevice(self, devices=None):
+        import sys
+
+        devices = self.DEVICES if devices is None else devices
+        rows = [
+            {"name": name, "max_input_channels": channels, "hostapi": hostapi}
+            for name, channels, hostapi in devices
+        ]
+        fake = MagicMock()
+        fake.query_devices.side_effect = lambda index=None: rows if index is None else rows[index]
+        fake.query_hostapis.return_value = [{"name": name} for name in self.HOST_APIS]
+        return patch.dict(sys.modules, {"sounddevice": fake})
+
+    def test_each_microphone_is_listed_once(self):
+        from pywhispr.audio import input_devices
+
+        with self._sounddevice():
+            assert input_devices() == [
+                (3, "Microphone (Logitech PRO X Wireless Gaming Headset)"),
+                (4, "Microphone (Logitech BRIO)"),
+            ]
+
+    def test_the_host_apis_own_default_pseudo_device_is_not_offered(self):
+        from pywhispr.audio import input_devices
+
+        with self._sounddevice():
+            assert not [name for _index, name in input_devices() if "Primary Sound" in name]
+
+    def test_every_host_api_is_still_available_for_resolving(self):
+        from pywhispr.audio import all_input_devices
+
+        with self._sounddevice():
+            assert len(all_input_devices()) == len(self.DEVICES)
+
+    def test_without_the_preferred_host_api_everything_is_listed(self):
+        """A duplicate-ridden list still lets someone pick a microphone; an empty
+        one does not."""
+        from pywhispr.audio import input_devices
+
+        mme_only = [row for row in self.DEVICES if row[2] == 0]
+        with self._sounddevice(mme_only):
+            assert len(input_devices()) == len(mme_only)
+
+
+class TestAStoredNameIsNotStranded:
+    """The choice is persisted by name and re-resolved at every recording, so a
+    name saved while every host API was listed has to keep resolving."""
+
+    def _sounddevice(self):
+        return TestOneEntryPerDevice()._sounddevice()
+
+    def test_a_name_the_shown_list_has_resolves_to_the_shown_device(self):
+        from pywhispr.audio import find_device
+
+        with self._sounddevice():
+            assert find_device("Microphone (Logitech BRIO)") == 4
+
+    def test_an_mme_truncated_name_resolves_to_the_full_device(self):
+        from pywhispr.audio import find_device
+
+        with self._sounddevice():
+            index = find_device("Microphone (Logitech PRO X Wire")
+            assert index == 3  # the DirectSound entry, not MME's index 1
+
+    def test_a_truncated_name_shows_as_the_device_it_resolved_to(self):
+        from pywhispr.audio import display_name
+
+        with self._sounddevice():
+            assert (
+                display_name("Microphone (Logitech PRO X Wire")
+                == "Microphone (Logitech PRO X Wireless Gaming Headset)"
+            )
+
+    def test_a_name_only_another_host_api_has_still_resolves(self):
+        from pywhispr.audio import find_device
+
+        with self._sounddevice():
+            assert find_device("Microphone (PRO X Wireless Gaming Headset)") == 6
+
+    def test_a_short_name_is_never_prefix_matched(self):
+        """Only MME's truncation justifies a prefix match; a short name that is
+        simply gone must stay gone rather than reach a longer device."""
+        from pywhispr.audio import find_device
+
+        with self._sounddevice():
+            assert find_device("Microphone") is None
+
+    def test_an_ambiguous_prefix_is_refused(self):
+        """Two devices whose names differ only past MME's cut are exactly the case
+        a name match cannot decide — the default with a warning beats a coin toss."""
+        from pywhispr.audio import find_device
+
+        truncated = "Microphone (Logitech BRIO 4K Pr"
+        with TestOneEntryPerDevice()._sounddevice(
+            [
+                (truncated, 2, 0),
+                ("Microphone (Logitech BRIO 4K Pro One)", 2, 1),
+                ("Microphone (Logitech BRIO 4K Pro Two)", 2, 1),
+            ]
+        ):
+            assert find_device(truncated) == 0  # its own exact MME entry, if still there
+
+        with TestOneEntryPerDevice()._sounddevice(
+            [
+                ("Microphone (Logitech BRIO 4K Pro One)", 2, 1),
+                ("Microphone (Logitech BRIO 4K Pro Two)", 2, 1),
+            ]
+        ):
+            assert find_device(truncated) is None
+
+    def test_a_device_that_is_really_gone_is_still_none(self):
+        from pywhispr.audio import find_device
+
+        with self._sounddevice():
+            assert find_device("Yeti Stereo Microphone") is None

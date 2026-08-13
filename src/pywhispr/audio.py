@@ -27,11 +27,28 @@ def rms_level(block: np.ndarray) -> float:
     return float(np.clip((db + 50.0) / 50.0, 0.0, 1.0))
 
 
-def input_devices() -> list[tuple[int, str]]:
-    """(index, name) for every device that can record, in PortAudio's own order.
+# PortAudio lists every physical microphone once per Windows host API, so the
+# choice of one host API is what makes the list show each device once. It is
+# DirectSound and not the more modern WASAPI because WASAPI is shared-mode here
+# and will not resample: opening 16 kHz on it fails outright with "Invalid
+# sample rate", and WDM-KS has no blocking API at all. MME records but truncates
+# every name to 31 characters ("Microphone (Logitech PRO X Wire").
+PREFERRED_HOST_API = "Windows DirectSound"
 
-    Empty when PortAudio cannot be asked at all — the settings page then offers
-    the system default alone, which is what the app used before any of this.
+# Each Windows host API adds a pseudo-device standing for "whatever the system
+# default is" — which the settings page already offers as its own first entry.
+PSEUDO_DEVICES = frozenset({"Primary Sound Capture Driver", "Microsoft Sound Mapper - Input"})
+
+# MME truncates names to MAXPNAMELEN-1, so a name persisted before this list was
+# narrowed to one host API may be a prefix of the real one.
+MME_NAME_LIMIT = 31
+
+
+def all_input_devices() -> list[tuple[int, str]]:
+    """(index, name) for every device that can record, every host API included.
+
+    What a stored name is resolved against — never what is shown. Empty when
+    PortAudio cannot be asked at all.
     """
     import sounddevice as sd
 
@@ -47,17 +64,68 @@ def input_devices() -> list[tuple[int, str]]:
     ]
 
 
+def input_devices() -> list[tuple[int, str]]:
+    """(index, name) for the devices to *show*: each physical microphone once.
+
+    Falls back to the unfiltered list if the preferred host API is not here or
+    has no inputs — a list with duplicates still lets someone pick a microphone,
+    an empty one does not.
+    """
+    import sounddevice as sd
+
+    devices = all_input_devices()
+    try:
+        host_apis = sd.query_hostapis()
+        preferred = [
+            (index, name)
+            for index, name in devices
+            if host_apis[sd.query_devices(index)["hostapi"]]["name"] == PREFERRED_HOST_API
+            and name not in PSEUDO_DEVICES
+        ]
+    except Exception:
+        log.exception("Could not group input devices by host API")
+        return devices
+    if not preferred:
+        log.warning("No %s input devices; listing every host API", PREFERRED_HOST_API)
+        return devices
+    return preferred
+
+
 def find_device(name: str) -> int | None:
     """The index of the input device called ``name``, or None if it is not here.
 
     Names are what gets persisted, not indices: an index is a position in
     PortAudio's list, so unplugging any other device renumbers it and the
     "chosen" microphone silently becomes a different one.
+
+    A name saved under a host API this no longer lists still resolves: the shown
+    devices are tried first, then every device, then — for a name MME truncated —
+    the one device it is an unambiguous prefix of.
     """
-    for index, device_name in input_devices():
-        if device_name == name:
-            return index
+    for candidates in (input_devices(), all_input_devices()):
+        for index, device_name in candidates:
+            if device_name == name:
+                return index
+        if len(name) >= MME_NAME_LIMIT:
+            matches = [index for index, other in candidates if other.startswith(name)]
+            if len(matches) == 1:
+                return matches[0]
     return None
+
+
+def display_name(name: str) -> str:
+    """``name`` as it appears in the shown list, or unchanged if it is not there.
+
+    A stored name may be an MME-truncated form of a device that is present, and
+    marking that "not connected" while it records perfectly well is a lie.
+    """
+    index = find_device(name)
+    if index is None:
+        return name
+    for shown_index, shown_name in input_devices():
+        if shown_index == index:
+            return shown_name
+    return name
 
 
 class AudioRecorder:
