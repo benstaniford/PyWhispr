@@ -1,13 +1,16 @@
 """Say "thumbs up emoji" and get the character.
 
 The words before the trigger are looked up as an emoji name, longest phrase
-first, and the whole lot — words and trigger — becomes one character. Nothing
-resolves, nothing happens: "send me an emoji" has no emoji name in front of it,
-so :func:`rewrite` returns ``None`` and the transcript is left exactly as it was.
-That is the guard, and it belongs here rather than in the engine because only
+first, and the whole lot — words and trigger — becomes one character. Either
+:data:`TRIGGER_WORDS` will do, "emoji" or "emote", and a chain may mix them.
+Nothing resolves, nothing happens: "send me an emoji" has no emoji name in front
+of it, so :func:`rewrite` returns ``None`` and the transcript is left exactly as it
+was. That is the guard, and it belongs here rather than in the engine because only
 this module knows what counts as an emoji name.
 
-Two tiers, and the order matters:
+Four tiers, ordered by how much each is guessing, so the loose ones only ever see
+what the strict ones could not reach. That ordering is not presentation: it is what
+makes the loose tiers safe to have at all.
 
 1. :data:`ALIASES` — what people actually say. Hand-written, and needed for two
    reasons the Unicode data cannot fix. The standard library carries the
@@ -20,7 +23,22 @@ Two tiers, and the order matters:
    it is free: no data file, no dependency, ~3,000 names in a couple of
    milliseconds. Exact name, then a prefix at a word boundary ("waving hand" →
    ``WAVING HAND SIGN``), then a name containing all the words asked for ("pizza"
-   → ``SLICE OF PIZZA``). The shortest name wins, being the least qualified.
+   → ``SLICE OF PIZZA``). The shortest name wins, being the least qualified. Then
+   the same names and aliases with the spaces taken out, because people say
+   compounds as one word: "eyeroll", "thumbsup".
+3. :data:`HOMOPHONES` — the name as the model misheard it. "I roll" for "eyeroll",
+   "hi five", "plus won", "czech mark". A closed list of exact-sound-equal words,
+   because the useful substitutions here change the *word* rather than a letter,
+   and no letter-level metric reaches them: "iroll" is one edit from "troll" and
+   three from "eyeroll".
+4. :func:`_fuzzy` — near enough on the squashed form, unambiguously, and only for
+   terms long enough that an edit is not half the dictionary. This is the tier that
+   can be wrong about a correctly spoken name, which is why it is last and why a
+   tie counts as no answer.
+
+Soundex and its relatives were measured and rejected: they collide on `cry`/`car`,
+`smile`/`snail` and `taco`/`taxi`, and they miss `i`/`eye` and `hi`/`high` outright
+because they preserve the first letter — the very cases that motivated the work.
 
 Characters are written as escapes rather than literals so that this file is pure
 ASCII: it has to survive editors, terminals and code review on three platforms,
@@ -29,6 +47,7 @@ and ``\\U0001F44D`` cannot be mangled by any of them.
 
 from __future__ import annotations
 
+import itertools
 import re
 import unicodedata
 from functools import lru_cache
@@ -36,17 +55,25 @@ from functools import lru_cache
 from pywhispr.join import CONTINUATION_WORDS
 from pywhispr.plugins.api import Match, Rewrite, Trigger, Word
 from pywhispr.scratch import SEGMENT_BOUNDARY
+from pywhispr.vocab import edit_distance_within
 
 NAME = "emoji"
 
-TRIGGER_WORD = "emoji"
+# The words that ask for one. "emote" as well as "emoji" because people say both,
+# and they are interchangeable here — a chain may even mix them.
+#
+# "emote" is the riskier of the two, being an ordinary verb ("the actors emote"),
+# but it is protected by the same two things "emoji" is: a request has to end a
+# clause or lead a chain, *and* the words in front of it have to name an emoji. "He
+# began to emote." satisfies neither, because "began to" is not an emoji.
+TRIGGER_WORDS = ("emoji", "emote")
 
 # Every occurrence is offered and :func:`_is_a_request` decides which of them are
 # asking for an emoji rather than talking about one. That decision cannot be the
 # Trigger's ``at_segment_end``, tempting as it looks: a chain — "man emoji gun
 # emoji" — has an ordinary word after its first trigger, so the segment rule threw
 # the whole first half away before this module ever saw it.
-TRIGGERS = (Trigger(phrase=TRIGGER_WORD),)
+TRIGGERS = tuple(Trigger(phrase=word) for word in TRIGGER_WORDS)
 
 # Most words the name may span, counted back from the trigger. Four, like
 # vocab.MAX_PHRASE_WORDS: past that a spoken phrase is a sentence.
@@ -55,6 +82,63 @@ MAX_PHRASE_WORDS = 4
 # Below this, a query is too short to mean anything specific. Guards the index
 # tiers, where two characters would prefix-match half of Unicode.
 MIN_QUERY_CHARS = 3
+
+# The fuzzy tier's limits. Four characters because at three an edit reaches most
+# of the dictionary, and a budget of two because "partly popper" is two edits from
+# "party popper" while three lets "deadline" become a seedling.
+MIN_FUZZY_CHARS = 4
+FUZZY_BUDGET = 2
+
+# How many rewritten spellings one phrase may be tried as, so four homophones in a
+# row cannot turn a single lookup into a hundred.
+MAX_HOMOPHONE_VARIANTS = 16
+
+# Words the model writes for a word that sounds identical, against the spelling
+# that names an emoji. This is what makes "I roll emoji" the rolling eyes: the
+# model hears "eyeroll" and writes "I roll", and no amount of letter-level
+# cleverness recovers that — "iroll" is *one* edit from "troll" and three from
+# "eyeroll", so the fuzzy tier alone confidently answers with a troll.
+#
+# Exact-sound-equal pairs only, never approximations, and only where the
+# right-hand side actually names an emoji — this is a lookup key, so an entry that
+# resolves to nothing is dead weight.
+#
+# **These never reach the text.** The substitution happens on the way to the
+# lookup table and the words are replaced by a single character, so "eye" cannot
+# appear in the user's sentence. That is the whole reason this is safe here and
+# would not be as a general vocabulary pass, where "I" would become "eye" in
+# ordinary prose.
+#
+# Deliberately absent: knight/night, role/roll, medal/metal — pairs where *both*
+# spellings name a different emoji, so there is no answer to prefer.
+HOMOPHONES: dict[str, str] = {
+    "i": "eye",
+    "aye": "eye",
+    "won": "one",
+    "hi": "high",
+    "read": "red",
+    "czech": "check",
+    "cheque": "check",
+    "waiving": "waving",
+    "preying": "praying",
+    "prey": "pray",
+    "flour": "flower",
+    "whine": "wine",
+    "tee": "tea",
+    "plain": "plane",
+    "son": "sun",
+    "bare": "bear",
+    "hart": "heart",
+    "male": "mail",
+    "mussel": "muscle",
+    "rows": "rose",
+    "reign": "rain",
+    "rein": "rain",
+    "write": "right",
+    "rite": "right",
+    "peace": "piece",
+    "knew": "new",
+}
 
 # Where the emoji live. Deliberately not 1F000-1F2FF: mahjong tiles, playing
 # cards and enclosed letters are all named, all matchable and never what anyone
@@ -141,6 +225,22 @@ ALIASES: dict[str, str] = {
     "star struck": "\U0001f929",
     "pleading": "\U0001f97a",
     "wow": "\U0001f62e",
+    # Devils. Bare "devil" is the smiling one, because that is the one people mean
+    # when they do not say which — it is the teasing, mischievous one that gets used
+    # in conversation, where the angry one is a genuine insult. Two words beat one in
+    # the lookup loop, so "angry devil" is never reached through "devil".
+    #
+    # "angry face with horns" is here because that is 1F47F's *modern* name and the
+    # standard library only knows the Unicode 6 one, "IMP" — the same reason the
+    # gun and the hamburger need aliases. "smiling face with horns" resolves through
+    # the index already and is listed only so the pair reads as a pair.
+    "devil": "\U0001f608",
+    "devil face": "\U0001f608",
+    "smiling devil": "\U0001f608",
+    "smiling face with horns": "\U0001f608",
+    "angry devil": "\U0001f47f",
+    "angry devil face": "\U0001f47f",
+    "angry face with horns": "\U0001f47f",
     # hands and people
     "thumbs up": "\U0001f44d",
     "thumb up": "\U0001f44d",
@@ -162,6 +262,7 @@ ALIASES: dict[str, str] = {
     "thanks": "\U0001f64f",
     "thank you": "\U0001f64f",
     "folded hands": "\U0001f64f",
+    "praying hands": "\U0001f64f",
     "high five": "\U0001f64c",
     "muscle": "\U0001f4aa",
     "flex": "\U0001f4aa",
@@ -339,35 +440,66 @@ def _shortest(names: list[str], index: dict[str, str]) -> str:
     return min(names, key=lambda name: (len(name), ord(index[name])))
 
 
-@lru_cache(maxsize=512)
-def _resolve(phrase: str) -> str | None:
-    """The character `phrase` names, or None if it does not name one.
+@lru_cache(maxsize=1)
+def _squashed() -> dict[str, str]:
+    """Spaceless name to character, so "eyeroll" reaches "eye roll".
 
-    None is the common answer and not a failure: most words in front of the word
-    "emoji" are just words.
+    People say compounds as one word and the model writes them that way, but the
+    alias keys and the Unicode names are spaced. :func:`pywhispr.vocab.normalise`
+    solves the same problem by stripping separators entirely; this is that idea
+    confined to a second lookup table, because stripping them from the *index*
+    would turn the word-boundary prefix tier into substring matching and let
+    "fire" match "fireworks" again.
+
+    Curated aliases overwrite index names, so "thumbsup" is the thumb rather than
+    whatever Unicode name happens to squash to the same letters.
     """
-    key = _normalise(phrase)
-    if len(key) < MIN_QUERY_CHARS:
-        return None
+    table: dict[str, str] = {}
+    for name, char in _index().items():
+        table.setdefault(name.replace(" ", ""), char)
+    for phrase, char in ALIASES.items():
+        table[phrase.replace(" ", "")] = char
+    return table
 
-    # The alias table first, before any guard: an entry in it is a decision
-    # already made, the way an explicit `heard => wanted` line in the vocabulary
-    # skips the fuzzy tier's guards. "plus one" is two function words and would
-    # not survive the check below, which is exactly why it has to come first.
+
+def _guarded(key: str) -> list[str] | None:
+    """The key's words, or None if it is not something we should look up at all.
+
+    Shared by every tier below the alias table, so a guard cannot be enforced on
+    one and forgotten on another — which is exactly how the fuzzy tier came to
+    answer "the" with a tree during review of this change.
+    """
+    words = key.split()
+    if not words or len(key) < MIN_QUERY_CHARS:
+        return None
+    if not set(words).isdisjoint(TRIGGER_WORDS):
+        # A trigger word is not the name of anything. Worth stating outright, because
+        # the Unicode data has "EMOJI COMPONENT BALD" and three siblings, so the
+        # prefix tier answers "emoji" with a hairstyle — and "emote" is two edits
+        # from "note", so the fuzzy tier answers it with a notepad.
+        return None
+    if all(word in CONTINUATION_WORDS for word in words):
+        # "an emoji", "of the emoji": function words are never an emoji name, so
+        # no tier below gets to guess at them. The same closed list vocab.py
+        # reuses as its never-rewrite guard.
+        return None
+    return words
+
+
+def _literal(key: str) -> str | None:
+    """Tiers that involve no guessing: the name is either written or it is not."""
+    # The alias table first, before every guard including the length one: an entry
+    # in it is a decision already made, the way an explicit `heard => wanted` line
+    # in the vocabulary skips the fuzzy tier's guards. "plus one" is two function
+    # words, and "ok" is two characters; both would fail a check below, and both
+    # are in the table because someone decided they should work. ("ok" was in fact
+    # dead until this ordering, refused by MIN_QUERY_CHARS despite being listed.)
     alias = ALIASES.get(key)
     if alias is not None:
         return alias
 
-    words = key.split()
-    if TRIGGER_WORD in words:
-        # The trigger word is not the name of anything. Worth stating outright,
-        # because the Unicode data has "EMOJI COMPONENT BALD" and three siblings,
-        # so the prefix tier answers "emoji" with a hairstyle.
-        return None
-    if not words or all(word in CONTINUATION_WORDS for word in words):
-        # "an emoji", "of the emoji": function words are never an emoji name, so
-        # the index tiers never get to guess at them. The same closed list
-        # vocab.py reuses as its never-rewrite guard.
+    words = _guarded(key)
+    if words is None:
         return None
 
     index = _index()
@@ -385,7 +517,86 @@ def _resolve(phrase: str) -> str | None:
     containing = [name for name in index if wanted.issubset(name.split())]
     if containing:
         return index[_shortest(containing, index)]
+
+    return _squashed().get(key.replace(" ", ""))
+
+
+def _homophone_variants(key: str) -> list[str]:
+    """Spellings of `key` that sound the same, nearest-miss substitutions applied.
+
+    Every combination, because the model can mishear more than one word of a
+    phrase, capped at :data:`MAX_HOMOPHONE_VARIANTS` so a long phrase of homophones
+    cannot turn one lookup into hundreds.
+    """
+    words = key.split()
+    options = [[word, HOMOPHONES[word]] if word in HOMOPHONES else [word] for word in words]
+    if all(len(option) == 1 for option in options):
+        return []
+    variants = []
+    for combination in itertools.product(*options):
+        variant = " ".join(combination)
+        if variant != key:
+            variants.append(variant)
+        if len(variants) >= MAX_HOMOPHONE_VARIANTS:
+            break
+    return variants
+
+
+def _fuzzy(key: str) -> str | None:
+    """One near-enough name, or None unless exactly one is that near.
+
+    Last of the tiers, and the only one that can be wrong about a name the user
+    spoke correctly — so it runs on the squashed forms (where a mis-split word
+    costs nothing), it needs a term long enough that an edit is not half the
+    dictionary, and a tie counts as no answer, exactly as
+    :func:`pywhispr.vocab._best_fuzzy` decides it.
+
+    Reaching this tier at all means the homophone table has already had its turn,
+    which is what keeps it honest: "i roll" resolves to the rolling eyes up there,
+    because down here "iroll" is one edit from "troll" and three from "eyeroll".
+    """
+    if _guarded(key) is None:
+        return None
+    squashed = key.replace(" ", "")
+    if len(squashed) < MIN_FUZZY_CHARS:
+        return None
+    table = _squashed()
+    for budget in range(1, FUZZY_BUDGET + 1):
+        found = {
+            char
+            for name, char in table.items()
+            if len(name) >= MIN_FUZZY_CHARS and edit_distance_within(squashed, name, budget)
+        }
+        if len(found) == 1:
+            return found.pop()
+        if found:
+            return None  # two names equally close: neither is an answer
     return None
+
+
+@lru_cache(maxsize=512)
+def _resolve(phrase: str) -> str | None:
+    """The character `phrase` names, or None if it does not name one.
+
+    Four tiers in order of how much they are guessing, so the aggressive ones only
+    ever see what precision could not reach:
+
+    1. :func:`_literal` — the name as written, including the spaceless form.
+    2. :data:`HOMOPHONES` — the same name as the model misheard it.
+    3. :func:`_fuzzy` — near enough, and unambiguously so.
+
+    None is the common answer and not a failure: most words in front of the word
+    "emoji" are just words.
+    """
+    key = _normalise(phrase)
+    got = _literal(key)
+    if got is not None:
+        return got
+    for variant in _homophone_variants(key):
+        got = _literal(variant)
+        if got is not None:
+            return got
+    return _fuzzy(key)
 
 
 def _leads_a_chain(match: Match) -> bool:
@@ -397,8 +608,8 @@ def _leads_a_chain(match: Match) -> bool:
     fire emoji and the water emoji" resolves to nothing and stays prose.
     """
     for index, word in enumerate(match.words_after):
-        if word.text.casefold() != TRIGGER_WORD:
-            continue
+        if word.text.casefold() not in TRIGGER_WORDS:
+            continue  # any trigger word closes a chain, so the two can be mixed
         if index == 0 or index > MAX_PHRASE_WORDS:
             return False  # "emoji emoji", or too far off to be one phrase
         run = match.words_after[:index]

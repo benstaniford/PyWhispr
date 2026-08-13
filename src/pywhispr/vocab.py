@@ -161,8 +161,12 @@ def _windows(text: str, spans: list[tuple[int, int]], start: int, limit: int):
         end += 1
 
 
-def _edit_distance_within(a: str, b: str, budget: int) -> bool:
-    """Levenshtein distance ≤ budget, abandoning the moment it cannot be."""
+def edit_distance_within(a: str, b: str, budget: int) -> bool:
+    """Levenshtein distance ≤ budget, abandoning the moment it cannot be.
+
+    Public because the emoji plugin's fuzzy tier needs exactly this, and reaching
+    into another module's private helper is worse than saying it is shared.
+    """
     if abs(len(a) - len(b)) > budget:
         return False
     previous = list(range(len(b) + 1))
@@ -195,7 +199,7 @@ def _distance_if_near(key: str, words: int, rule: Rule) -> int | None:
     if key.startswith(rule.key):
         return None
     for distance in range(1, _fuzzy_budget(len(rule.key)) + 1):
-        if _edit_distance_within(key, rule.key, distance):
+        if edit_distance_within(key, rule.key, distance):
             return distance
     return None
 
