@@ -10,7 +10,13 @@ DEVICES = [(0, "Microphone Array"), (1, "Yeti Stereo Microphone")]
 
 @pytest.fixture
 def devices():
-    with patch("pywhispr.ui.settings_dialog.input_devices", return_value=DEVICES):
+    """The shown list, the unfiltered list and the name canonicaliser together —
+    patching only the first would send the other two at the real hardware."""
+    with (
+        patch("pywhispr.ui.settings_dialog.input_devices", return_value=DEVICES),
+        patch("pywhispr.ui.settings_dialog.all_input_devices", return_value=DEVICES),
+        patch("pywhispr.ui.settings_dialog.display_name", side_effect=lambda name: name),
+    ):
         yield DEVICES
 
 
