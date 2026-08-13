@@ -87,7 +87,7 @@ class RemoteBackend(STTBackend):
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
         if not self._server_url:
-            raise RuntimeError("No server is set — use the tray menu's “Set server…”.")
+            raise RuntimeError("No server is set — see the tray menu's “Settings…”.")
         if sample_rate != SAMPLE_RATE:
             raise ValueError(f"Expected {SAMPLE_RATE} Hz audio, got {sample_rate}")
 

@@ -170,7 +170,17 @@ def _cmd_record(seconds: float) -> int:
     cfg = load_config()
     backend = _load_backend()
 
-    recorder = AudioRecorder(device=cfg.input_device)
+    # By name where one is configured, like the app: an index renumbers when any
+    # other device is unplugged.
+    from pywhispr.audio import find_device
+
+    device = find_device(cfg.input_device_name) if cfg.input_device_name else cfg.input_device
+    if cfg.input_device_name and device is None:
+        print(
+            f"{cfg.input_device_name} is not connected; using the system default.",
+            file=sys.stderr,
+        )
+    recorder = AudioRecorder(device=device)
     print(f"Recording for {seconds:.0f}s... speak now.", file=sys.stderr)
     recorder.start()
     time.sleep(seconds)

@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -78,18 +79,24 @@ def test_starts_in_loading_and_ignores_nothing_burger(app):
 
 
 class TestLiteMode:
-    """The Lite build offers a "Set server…" entry and hosts no API of its own."""
+    """The Lite build hosts no API of its own; its server field is on the settings
+    page (see test_settings_dialog.py)."""
 
-    def test_offers_set_server_and_hosts_no_api(self, qapp, monkeypatch):
+    def test_hosts_no_api(self, qapp, monkeypatch):
         monkeypatch.setattr("pywhispr.flavor.IS_LITE", True)
-        with isolated_app(api_enabled=True) as (instance, tray_cls):
+        with isolated_app(api_enabled=True) as (instance, _tray_cls):
             assert instance.api is None  # a client does not also host a server
-            assert tray_cls.call_args.kwargs["on_set_server"] is not None
 
-    def test_full_build_has_no_set_server_entry(self, qapp, monkeypatch):
-        monkeypatch.setattr("pywhispr.flavor.IS_LITE", False)
-        with isolated_app() as (instance, tray_cls):
-            assert tray_cls.call_args.kwargs["on_set_server"] is None
+    def test_a_new_server_url_rebuilds_the_backend(self, qapp, monkeypatch):
+        monkeypatch.setattr("pywhispr.flavor.IS_LITE", True)
+        with isolated_app() as (instance, _tray_cls):
+            edited = dataclasses.replace(instance.cfg, server_url="http://elsewhere:9149")
+            with (
+                patch("pywhispr.app.save_config"),
+                patch.object(instance, "_apply_server_url") as applied,
+            ):
+                instance._apply_settings(edited)
+            applied.assert_called_once_with("http://elsewhere:9149")
 
 
 class TestPushToTalk:
@@ -296,22 +303,16 @@ class TestVocabulary:
         assert not path.exists()
         assert [rule.wanted for rule in app._vocab] == ["BeyondTrust"]
 
-    def test_the_listener_is_restarted_even_if_saving_fails(self, app):
+    def test_a_failed_save_says_so_rather_than_raising(self, app):
+        """The editor is opened from inside the settings visit, which owns the
+        listener — so this only has to survive and report."""
         app._on_model_ready()
         with (
             patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit", return_value="BeyondTrust"),
             patch("pywhispr.vocab.save_vocabulary_text", side_effect=OSError("read-only")),
         ):
             app._edit_vocabulary()
-        app.listener.stop.assert_called_once()
-        app.listener.start.assert_called_once()
         app.tray.notify.assert_called_once()
-
-    def test_ignored_while_a_dictation_is_in_flight(self, app):
-        app.state = State.TRANSCRIBING
-        with patch("pywhispr.ui.vocab_dialog.VocabularyDialog.edit") as edit:
-            app._edit_vocabulary()
-        edit.assert_not_called()
 
 
 class TestFillerRemoval:
@@ -669,23 +670,28 @@ class TestGpuOffer:
         app.tray.notify.assert_called_once()
 
 
-class TestGpuTrayEntry:
-    """Whether the tray is given a GPU entry at all."""
+class TestGpuSettingsEntry:
+    """Whether the settings page is offered a GPU row at all."""
 
-    def _tray_kwargs(self, supported, qtbot, qapp):
+    def _settings_kwargs(self, supported, qtbot, qapp):
         with patch("pywhispr.gpu.supported", return_value=supported):
-            with isolated_app() as (_instance, tray_cls):
-                return tray_cls.call_args.kwargs
+            with isolated_app() as (instance, _tray_cls):
+                instance.state = State.IDLE
+                with patch(
+                    "pywhispr.ui.settings_dialog.SettingsDialog.edit", return_value=None
+                ) as edit:
+                    instance._show_settings()
+                return edit.call_args.kwargs
 
-    def test_no_entry_where_no_gpu_path_could_run(self, qtbot, qapp):
+    def test_no_row_where_no_gpu_path_could_run(self, qtbot, qapp):
         """macOS: CUDA and DirectML have no build for it and MLX is already on Metal."""
-        kwargs = self._tray_kwargs(False, qtbot, qapp)
+        kwargs = self._settings_kwargs(False, qtbot, qapp)
         assert kwargs["on_enable_gpu"] is None
         assert kwargs["on_disable_gpu"] is None
         assert kwargs["gpu_active"] is None
 
-    def test_an_entry_where_one_could(self, qtbot, qapp):
-        kwargs = self._tray_kwargs(True, qtbot, qapp)
+    def test_a_row_where_one_could(self, qtbot, qapp):
+        kwargs = self._settings_kwargs(True, qtbot, qapp)
         assert callable(kwargs["on_enable_gpu"])
         assert callable(kwargs["on_disable_gpu"])
         assert callable(kwargs["gpu_active"])
@@ -741,27 +747,6 @@ class TestGpuDisable:
         assert app.cfg.use_gpu is True
         dialogs.save.assert_not_called()
         dialogs.told.assert_not_called()
-
-    def test_the_hotkey_is_silenced_around_the_dialog(self, app, dialogs):
-        """The chord pressed inside a modal must not start a recording."""
-        app.state = State.IDLE
-        app._disable_gpu()
-        app.listener.stop.assert_called_once()
-        app.listener.start.assert_called()
-
-    def test_the_hotkey_comes_back_even_if_the_dialog_explodes(self, app, dialogs):
-        app.state = State.IDLE
-        dialogs.ask.side_effect = RuntimeError("no Qt today")
-        with pytest.raises(RuntimeError):
-            app._disable_gpu()
-        app.listener.start.assert_called()
-
-    def test_it_waits_until_the_app_is_idle(self, app, dialogs):
-        """Deleting nothing is still no reason for a modal over a live recording."""
-        app.state = State.RECORDING
-        app._disable_gpu()
-        dialogs.ask.assert_not_called()
-        assert app.cfg.use_gpu is True
 
     def test_it_will_not_fight_a_setup_that_is_still_running(self, app, dialogs):
         app.state = State.IDLE
@@ -1219,3 +1204,137 @@ class TestVoiceReset:
         with patch.object(app.injector, "insert") as insert:
             app._on_transcribed("Book the room. Clear clear. Book the hall.")
         insert.assert_called_once_with("Book the room. Clear clear. Book the hall.")
+
+
+class TestSettingsVisit:
+    """The tray's one door: the hotkey is silenced for the whole visit and the
+    edited config is applied when it closes."""
+
+    def _open(self, app, returned):
+        with (
+            patch("pywhispr.ui.settings_dialog.SettingsDialog.edit", return_value=returned),
+            patch("pywhispr.app.save_config") as save,
+        ):
+            app._show_settings()
+        return save
+
+    def test_the_hotkey_is_silenced_around_the_window(self, app):
+        """A chord pressed inside a settings dialog must not start a recording."""
+        app.state = State.IDLE
+        self._open(app, None)
+        app.listener.stop.assert_called_once()
+        app.listener.start.assert_called_once()
+
+    def test_the_hotkey_comes_back_even_if_the_window_explodes(self, app):
+        app.state = State.IDLE
+        with patch(
+            "pywhispr.ui.settings_dialog.SettingsDialog.edit",
+            side_effect=RuntimeError("no Qt today"),
+        ):
+            with pytest.raises(RuntimeError):
+                app._show_settings()
+        app.listener.start.assert_called_once()
+
+    def test_it_waits_until_the_app_is_idle(self, app):
+        app.state = State.RECORDING
+        with patch("pywhispr.ui.settings_dialog.SettingsDialog.edit") as edit:
+            app._show_settings()
+        edit.assert_not_called()
+
+    def test_cancelling_saves_nothing(self, app):
+        app.state = State.IDLE
+        save = self._open(app, None)
+        save.assert_not_called()
+
+    def test_saving_applies_and_writes(self, app):
+        app.state = State.IDLE
+        edited = dataclasses.replace(app.cfg, remove_fillers=False, max_recording_seconds=30)
+        save = self._open(app, edited)
+        save.assert_called_once()
+        assert app.cfg.remove_fillers is False
+        assert app._max_duration_timer.interval() == 30_000
+
+    def test_gpu_changes_made_inside_the_window_survive_the_save(self, app):
+        """gpu.turn_off writes to the live config while the window is open; a
+        wholesale replace would put the window's older copy back over it."""
+        app.state = State.IDLE
+        edited = dataclasses.replace(app.cfg)  # copied before the GPU button was used
+        app.cfg.use_gpu = False
+        self._open(app, edited)
+        assert app.cfg.use_gpu is False
+
+    def test_a_new_hotkey_is_registered(self, app):
+        app.state = State.IDLE
+        edited = dataclasses.replace(app.cfg, hotkey="<ctrl>+<alt>+j")
+        with patch("pywhispr.app.create_hotkey_listener") as make:
+            self._open(app, edited)
+        assert make.call_args.args[0] == "<ctrl>+<alt>+j"
+        assert app.cfg.hotkey == "<ctrl>+<alt>+j"
+
+    def test_a_hotkey_that_will_not_register_is_reverted(self, app):
+        app.state = State.IDLE
+        old = app.cfg.hotkey
+        edited = dataclasses.replace(app.cfg, hotkey="<nonsense>")
+        with patch("pywhispr.app.create_hotkey_listener") as make:
+            make.side_effect = [RuntimeError("taken"), MagicMock()]
+            self._open(app, edited)
+        assert app.cfg.hotkey == old
+        app.tray.notify.assert_called()
+
+    def test_settings_that_need_a_restart_say_so(self, app):
+        app.state = State.IDLE
+        edited = dataclasses.replace(app.cfg, api_port=9999)
+        self._open(app, edited)
+        assert "Restart" in app.tray.notify.call_args.args[0]
+
+    def test_settings_that_do_not_stay_quiet(self, app):
+        app.state = State.IDLE
+        edited = dataclasses.replace(app.cfg, play_sounds=False)
+        self._open(app, edited)
+        app.tray.notify.assert_not_called()
+
+
+class TestMicrophoneChoice:
+    """The chosen input device is resolved by name at every recording."""
+
+    def test_no_choice_means_the_system_default(self, app):
+        assert app._input_device() is None
+
+    def test_a_legacy_index_is_still_honoured(self, app):
+        """Configs written before names existed keep working untouched."""
+        app.cfg.input_device = 3
+        assert app._input_device() == 3
+
+    def test_the_chosen_device_is_looked_up_by_name(self, app):
+        app.cfg.input_device_name = "Yeti"
+        app.cfg.input_device = 3  # stale index: the name wins
+        with patch("pywhispr.app.find_device", return_value=1):
+            assert app._input_device() == 1
+
+    def test_a_missing_device_falls_back_to_the_default_and_says_so(self, app):
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", return_value=None):
+            assert app._input_device() is None
+        assert "Yeti" in app.tray.notify.call_args.args[1]
+
+    def test_it_complains_once_rather_than_every_dictation(self, app):
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", return_value=None):
+            app._input_device()
+            app._input_device()
+        assert app.tray.notify.call_count == 1
+
+    def test_it_complains_again_after_the_device_came_back(self, app):
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", side_effect=[None, 2, None]):
+            app._input_device()
+            app._input_device()
+            app._input_device()
+        assert app.tray.notify.call_count == 2
+
+    def test_recording_opens_the_resolved_device(self, app):
+        app._on_model_ready()
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", return_value=4):
+            app._start_recording()
+        assert app.recorder.device == 4

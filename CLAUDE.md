@@ -79,6 +79,38 @@ word; `caret.py` finds `preceding`.
   `HIServices` while letting `CoreFoundation` import for real tore pyobjc out of
   `sys.modules` and made later tests pass for the wrong reason. Fake both.
 
+## Settings page (`ui/settings_dialog.py`) + the microphone
+
+The tray menu had grown a row per feature. It now carries only what you reach
+mid-sentence — start/stop, recent dictations, Settings…, Quit — and every
+preference lives on the page. `tray.py` keeps `open_config`/`open_log` because
+`open_path` lives there; the settings page calls them.
+
+- **The dialog edits a copy of the config and the app copies fields back**
+  (`EDITED_FIELDS` + `app._apply_settings`), never a wholesale swap. The GPU
+  buttons on the Advanced tab mutate the *live* config while the window is open
+  (`gpu.turn_off` writes `use_gpu` and saves), so replacing the config with the
+  window's older copy would silently undo them.
+- **Not every config key is on the page.** The model, thread and paste-timing
+  knobs stay in `config.toml` — typed once in a lifetime, and a spin box each
+  would bury the settings people do change. "Open config file" is on the page.
+- **The listener is silenced for the whole visit**, so the nested dialogs (hotkey
+  capture, vocabulary editor, GPU) no longer juggle it themselves and cannot
+  re-arm it while the settings window is still up.
+- `RESTART_FIELDS` is what genuinely cannot change in-process — the API's socket,
+  whether plugins were imported — and earns a notification. Everything else is
+  rebuilt in `_apply_settings` and applies at the next dictation.
+- **The microphone is persisted by name** (`input_device_name`), resolved through
+  `audio.find_device` at *every* recording. A PortAudio index is a position in a
+  list, so unplugging any *other* device renumbers it and the "chosen" microphone
+  silently becomes a different one. The old `input_device` index is still read for
+  configs that have one — nothing to migrate, nothing lost on upgrade.
+- **A missing device falls back to the default and says so**, once per
+  disappearance (`_missing_device`): the whole point of choosing a microphone is
+  that the default is the wrong one, so a silent fallback is the bug. The page
+  keeps an unplugged choice in the list, marked, or opening settings would reset
+  it just by being opened.
+
 ## Transcript recall (`history.py` + `ui/history_dialog.py`)
 
 Auto-paste follows the focus, so a dictation aimed at a box that had lost focus

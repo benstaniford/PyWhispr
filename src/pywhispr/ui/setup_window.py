@@ -391,12 +391,12 @@ def ask_to_enable(parent=None, first_run: bool = False, kind: str = "cuda") -> b
         body = (
             "Set it up now? Either way there is a one-time download first, and dictation "
             "cannot start until it finishes. Saying yes downloads more. "
-            "The tray menu turns it off again later."
+            "The settings page turns it off again later."
         )
     else:
         body = (
             "Set it up now? There is a one-time download first. Dictation keeps working "
-            "while it runs, and the tray menu turns it off again."
+            "while it runs, and the settings page turns it off again."
         )
     # The undo used to be quoted as "pywhispr disable-gpu", which the packaged
     # Windows build gives nobody a way to run: it ships one GUI executable, no

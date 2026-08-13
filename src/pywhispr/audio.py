@@ -27,6 +27,39 @@ def rms_level(block: np.ndarray) -> float:
     return float(np.clip((db + 50.0) / 50.0, 0.0, 1.0))
 
 
+def input_devices() -> list[tuple[int, str]]:
+    """(index, name) for every device that can record, in PortAudio's own order.
+
+    Empty when PortAudio cannot be asked at all — the settings page then offers
+    the system default alone, which is what the app used before any of this.
+    """
+    import sounddevice as sd
+
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        log.exception("Could not list input devices")
+        return []
+    return [
+        (index, str(device["name"]))
+        for index, device in enumerate(devices)
+        if device["max_input_channels"] > 0
+    ]
+
+
+def find_device(name: str) -> int | None:
+    """The index of the input device called ``name``, or None if it is not here.
+
+    Names are what gets persisted, not indices: an index is a position in
+    PortAudio's list, so unplugging any other device renumbers it and the
+    "chosen" microphone silently becomes a different one.
+    """
+    for index, device_name in input_devices():
+        if device_name == name:
+            return index
+    return None
+
+
 class AudioRecorder:
     """Records mono float32 audio at 16 kHz until stopped.
 
@@ -40,7 +73,7 @@ class AudioRecorder:
         device: int | None = None,
         on_level: Callable[[float], None] | None = None,
     ):
-        self._device = device
+        self.device = device  # index, or None for the system default
         self._on_level = on_level
         self._stream = None
         self._blocks: list[np.ndarray] = []
@@ -65,7 +98,7 @@ class AudioRecorder:
                 self._on_level(rms_level(block))
 
         self._stream = sd.InputStream(
-            device=self._device,
+            device=self.device,
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
@@ -73,7 +106,7 @@ class AudioRecorder:
             callback=callback,
         )
         self._stream.start()
-        log.debug("Recording started (device=%s)", self._device)
+        log.debug("Recording started (device=%s)", self.device)
 
     def reset(self) -> None:
         """Throw away what has been captured and keep the stream open.

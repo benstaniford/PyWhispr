@@ -121,11 +121,11 @@ class TestWhatItPromises:
     def test_the_offer_says_dictation_continues_for_an_existing_install(self):
         assert "keeps working" in self._offer_text(first_run=False)
 
-    def test_the_offer_points_at_the_tray_for_the_undo(self):
+    def test_the_offer_points_at_the_settings_page_for_the_undo(self):
         """Not "pywhispr disable-gpu": the packaged Windows build puts nothing on PATH."""
         for first_run in (True, False):
             text = self._offer_text(first_run)
-            assert "tray menu" in text
+            assert "settings page" in text
             assert "pywhispr" not in text
 
     def test_a_first_run_is_not_told_to_restart(self, qtbot, monkeypatch):

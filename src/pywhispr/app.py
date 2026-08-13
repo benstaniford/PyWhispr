@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 import time
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from pywhispr import flavor, gpu
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
-from pywhispr.audio import AudioRecorder
+from pywhispr.audio import AudioRecorder, find_device
 from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, save_config
 from pywhispr.ducking import create_ducker
@@ -48,6 +49,12 @@ FOCUS_RESTORE_MS = 150
 
 # How long "Starting over…" replaces the waveform after the reset hotkey.
 RESET_FEEDBACK_MS = 700
+
+# Settings that cannot take effect in a running process: the API's socket is bound
+# at startup and plugins are imported once and cannot be un-imported (see
+# plugins/registry.py). Changing one of these earns a restart notice rather than a
+# silent no-op.
+RESTART_FIELDS = ("api_enabled", "api_host", "api_port", "plugins_enabled", "plugin_actions_enabled")
 
 
 class State(Enum):
@@ -88,20 +95,12 @@ class PyWhisprApp(QObject):
         # Apple Silicon is on the Metal GPU through MLX already, so the entry could
         # only ever say no — and until the triggered(checked) fix in tray.py it said
         # yes instead and started a download that could only fail.
-        gpu_possible = gpu.supported()
+        self._gpu_possible = gpu.supported()
         self.tray = TrayIcon(
             on_quit=self._quit,
             on_toggle=self._hotkey_toggled.emit,
-            on_change_hotkey=self._change_hotkey,
-            on_edit_vocabulary=self._edit_vocabulary,
-            on_open_plugins=self._open_plugins_folder if cfg.plugins_enabled else None,
-            on_enable_gpu=self._enable_gpu if gpu_possible else None,
-            on_disable_gpu=self._disable_gpu if gpu_possible else None,
-            gpu_active=self._gpu_active if gpu_possible else None,
             on_show_history=self._history_requested.emit,
-            # Lite only: the model runs on another machine, so the user needs a
-            # way to say which one. The full app never shows this entry.
-            on_set_server=self._set_server if flavor.IS_LITE else None,
+            on_settings=self._show_settings,
         )
         self._progress_window = None  # kept alive while anything is downloading
         self._load_model = None  # set by start(), possibly deferred behind GPU setup
@@ -133,6 +132,9 @@ class PyWhisprApp(QObject):
         # can still be recovered. In memory only — see history.py.
         self._history = TranscriptHistory()
         self.recorder = AudioRecorder(device=cfg.input_device, on_level=self._mic_level.emit)
+        # The name of a chosen microphone we have already complained about, so an
+        # unplugged one is reported once rather than at every dictation.
+        self._missing_device: str | None = None
         self.ducker = create_ducker(cfg)
         self.listener = create_hotkey_listener(
             cfg.hotkey,
@@ -201,7 +203,8 @@ class PyWhisprApp(QObject):
         log.info(
             "Starting: hotkey=%s, device=%s, api=%s, max_recording=%ss",
             self.cfg.hotkey,
-            self.cfg.input_device if self.cfg.input_device is not None else "system default",
+            self.cfg.input_device_name
+            or (self.cfg.input_device if self.cfg.input_device is not None else "system default"),
             f"{self.cfg.api_host}:{self.cfg.api_port}" if self.cfg.api_enabled else "disabled",
             self.cfg.max_recording_seconds,
         )
@@ -218,13 +221,13 @@ class PyWhisprApp(QObject):
             self.listener.start()
             log.info("Hotkey listener started (%s)", type(self.listener).__name__)
         except Exception as exc:  # bad hotkey string, missing permission, ...
-            # Not fatal: the tray menu can still change the hotkey or quit, and
+            # Not fatal: the tray menu can still open the settings or quit, and
             # an app that silently disappears teaches the user nothing.
             log.exception("Could not register hotkey %r", self.cfg.hotkey)
             self._report_error(
                 "Hotkey not registered",
                 f"Could not register {self.cfg.hotkey!r}: {exc}. "
-                "Use the tray menu to pick a different one.",
+                "Use the tray menu's Settings… to pick a different one.",
             )
         self._check_double_tap_permission(self.cfg.hotkey)
         if self.reset_listener is not None:
@@ -513,10 +516,6 @@ class PyWhisprApp(QObject):
             return  # cancelled, or unchanged: nothing to rebuild
         self._apply_server_url(url)
 
-    def _set_server(self) -> None:
-        """Tray 'Set server…': repoint at a different server and reconnect."""
-        self._prompt_for_server()
-
     def _apply_server_url(self, url: str) -> None:
         """Save the new server, rebuild the backend and (re)connect to it."""
         self.cfg.server_url = url
@@ -646,7 +645,7 @@ class PyWhisprApp(QObject):
         self._run_gpu_setup(kind=kind)
 
     def _disable_gpu(self) -> None:
-        """Tray menu: stop using GPU acceleration, keeping the libraries on disk.
+        """Settings page: stop using GPU acceleration, keeping the libraries on disk.
 
         Nothing is reloaded here. onnxruntime resolves a session's providers when it
         is built and cannot be talked out of them afterwards — the same reason
@@ -657,28 +656,18 @@ class PyWhisprApp(QObject):
         from pywhispr.ui.foreground import show_in_front
         from pywhispr.ui.setup_window import ask_to_disable, say_restart_needed
 
-        if self.state not in (State.IDLE, State.LOADING):
-            return  # no modal mid-recording, like _change_hotkey
         if self._progress_window is not None and self._progress_window.gpu_running:
             show_in_front(self._progress_window)  # it is being installed right now
             return
-        # The dialog takes focus, so what we remembered inserting is no longer
-        # behind the caret; and the chord pressed inside it must not start a
-        # recording.
-        self._context.invalidate()
-        self.listener.stop()
-        try:
-            size = (
-                cuda.APPROXIMATE_DOWNLOAD_MB
-                if cuda.is_installed()
-                else directml.APPROXIMATE_DOWNLOAD_MB
-            )
-            if not ask_to_disable(download_mb=size):
-                return
-            gpu.turn_off(self.cfg)
-            say_restart_needed("GPU acceleration is switched off; the libraries stay on disk.")
-        finally:
-            self._resume_listeners()
+        size = (
+            cuda.APPROXIMATE_DOWNLOAD_MB
+            if cuda.is_installed()
+            else directml.APPROXIMATE_DOWNLOAD_MB
+        )
+        if not ask_to_disable(download_mb=size):
+            return
+        gpu.turn_off(self.cfg)
+        say_restart_needed("GPU acceleration is switched off; the libraries stay on disk.")
 
     def _on_model_failed(self, message: str) -> None:
         """Model load failed: stay alive and keep saying so.
@@ -730,7 +719,35 @@ class PyWhisprApp(QObject):
         else:
             log.debug("Hotkey ignored: still %s", self.state.name)
 
+    def _input_device(self) -> int | None:
+        """Which microphone to open: the chosen one, or the system default.
+
+        Resolved at every recording rather than once at startup, because devices
+        come and go while the app runs — and by name, because PortAudio indices
+        renumber when any *other* device is unplugged. A chosen device that is not
+        here falls back to the default, but says so: the whole point of choosing
+        one is that the default is the wrong microphone.
+        """
+        name = self.cfg.input_device_name
+        if not name:
+            return self.cfg.input_device  # legacy index, or None for the default
+        index = find_device(name)
+        if index is None:
+            if self._missing_device != name:
+                self._missing_device = name
+                log.warning("Microphone %r is not connected; using the system default", name)
+                self.tray.notify(
+                    "Microphone unavailable",
+                    f"{name} is not connected. Recording with the system default instead.",
+                )
+            return None
+        if self._missing_device is not None:
+            log.info("Microphone %r is back", name)
+            self._missing_device = None
+        return index
+
     def _start_recording(self) -> None:
+        self.recorder.device = self._input_device()
         try:
             self.recorder.start()
         except Exception as exc:
@@ -1051,48 +1068,140 @@ class PyWhisprApp(QObject):
         except Exception:
             log.exception("Could not restart the hotkey listener")
 
-    def _change_hotkey(self) -> None:
-        """Tray menu: capture a new chord, save it, and re-register the listener."""
+    # -- settings ------------------------------------------------------------
+
+    def _show_settings(self) -> None:
+        """The tray's one door to every preference.
+
+        The listener is silenced for the whole visit — including the hotkey capture
+        and the vocabulary editor opened from inside it — so a chord pressed in a
+        dialog cannot start a recording, and nothing nested has to juggle it.
+        """
         if self.state not in (State.IDLE, State.LOADING):
+            log.debug("Settings ignored: still %s", self.state.name)
             return
+        from pywhispr.ui.settings_dialog import SettingsDialog
+
+        # The window takes focus, so what we remembered inserting is no longer
+        # behind the caret.
+        self._context.invalidate()
+        self.listener.stop()
+        try:
+            edited = SettingsDialog.edit(
+                self.cfg,
+                on_change_hotkey=self._capture_hotkey,
+                on_change_reset_hotkey=self._capture_hotkey,
+                on_edit_vocabulary=self._edit_vocabulary,
+                on_open_plugins=self._open_plugins_folder,
+                on_enable_gpu=self._enable_gpu if self._gpu_possible else None,
+                on_disable_gpu=self._disable_gpu if self._gpu_possible else None,
+                gpu_active=self._gpu_active if self._gpu_possible else None,
+                on_open_config=self.tray.open_config,
+                on_open_log=self.tray.open_log,
+            )
+        finally:
+            self._resume_listeners()
+        if edited is not None:
+            self._apply_settings(edited)
+
+    def _capture_hotkey(self, current: str) -> str | None:
+        """Capture a chord for the settings page. Registering it is _apply_settings'
+        job — this only asks."""
         from pywhispr.ui.hotkey_dialog import HotkeyCaptureDialog
 
-        # The dialog takes focus, so whatever we remembered inserting is no
-        # longer behind the caret.
-        self._context.invalidate()
-        # Stop listening while the dialog is up so pressing the current chord
-        # inside it doesn't start a recording.
-        self.listener.stop()
-        new_chord = HotkeyCaptureDialog.capture(self.cfg.hotkey)
+        return HotkeyCaptureDialog.capture(current)
 
-        if new_chord and new_chord != self.cfg.hotkey:
-            old_chord = self.cfg.hotkey
-            try:
-                self.listener = create_hotkey_listener(
-                    new_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
-                )
-                self.listener.start()
-                self.cfg.hotkey = new_chord
-                save_config(self.cfg)
-                log.info("Hotkey changed to %s", new_chord)
-                self._check_double_tap_permission(new_chord)
-            except Exception as exc:
-                log.exception("Could not register new hotkey")
-                self.tray.notify("Hotkey not changed", f"Could not register {new_chord!r}: {exc}")
-                self.listener = create_hotkey_listener(
-                    old_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
-                )
-                self.listener.start()
-        else:
-            self.listener.start()
+    def _apply_settings(self, new: Config) -> None:
+        """Save the edited config and put as much of it into effect as can be.
 
+        Everything derived at construction is rebuilt here, so the passes read the
+        new preferences on the very next dictation. What genuinely cannot change in
+        a running process — the network API's socket, whether plugins were imported
+        — is named in a notification rather than pretended about.
+        """
+        from pywhispr.ui.settings_dialog import EDITED_FIELDS
+
+        old = dataclasses.replace(self.cfg)
+        # Field by field onto the live config, never a wholesale swap: the GPU
+        # buttons on the settings page write to that same config while the window
+        # is open, and replacing it would undo them. See EDITED_FIELDS.
+        for field in EDITED_FIELDS:
+            setattr(self.cfg, field, getattr(new, field))
+        new = self.cfg
+        save_config(new)
+        if new.hotkey != old.hotkey:
+            self._register_hotkey(new.hotkey, old.hotkey)
+        if new.reset_hotkey != old.reset_hotkey:
+            self._register_reset_hotkey(new.reset_hotkey)
+        self._fillers = filler_words(new.extra_filler_words, new.keep_filler_words)
+        self._reset_phrases = compile_reset_phrases(new.voice_reset_phrases)
+        self.ducker = create_ducker(new)
+        if new.play_sounds != old.play_sounds:
+            self._start_sound = self._load_sound("start.wav")
+            self._stop_sound = self._load_sound("stop.wav")
+        self._max_duration_timer.setInterval(new.max_recording_seconds * 1000)
+        if new.input_device_name != old.input_device_name:
+            self._missing_device = None  # a new choice deserves its own complaint
+            log.info("Microphone set to %s", new.input_device_name or "the system default")
+        if flavor.IS_LITE and new.server_url != old.server_url:
+            self._apply_server_url(new.server_url)
+        changed = [f for f in RESTART_FIELDS if getattr(new, f) != getattr(old, f)]
+        if changed:
+            log.info("Settings needing a restart changed: %s", ", ".join(changed))
+            self.tray.notify(
+                "Restart needed",
+                "Those settings take effect the next time " f"{flavor.PRODUCT_NAME} starts.",
+            )
         if self.state != State.LOADING:
             self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
 
-    def _edit_vocabulary(self) -> None:
-        """Tray menu: edit the custom vocabulary and apply it without a restart."""
-        if self.state not in (State.IDLE, State.LOADING):
+    def _register_hotkey(self, new_chord: str, old_chord: str) -> None:
+        """Re-register the dictation hotkey, going back to the old one if it fails.
+
+        The listener is stopped by the caller (the settings visit), so this only
+        ever builds and starts.
+        """
+        try:
+            self.listener = create_hotkey_listener(
+                new_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
+            )
+            self.listener.start()
+            log.info("Hotkey changed to %s", new_chord)
+            self._check_double_tap_permission(new_chord)
+        except Exception as exc:
+            log.exception("Could not register new hotkey")
+            self.cfg.hotkey = old_chord
+            save_config(self.cfg)
+            self.tray.notify("Hotkey not changed", f"Could not register {new_chord!r}: {exc}")
+            self.listener = create_hotkey_listener(
+                old_chord, self._hotkey_toggled.emit, self._hotkey_released.emit
+            )
+            self._resume_listeners()
+
+    def _register_reset_hotkey(self, chord: str) -> None:
+        """Rebuild the start-over listener. A failure only costs that hotkey."""
+        if self.reset_listener is not None:
+            self.reset_listener.stop()
+            self.reset_listener = None
+        if not chord or chord == self.cfg.hotkey:
             return
+        try:
+            self.reset_listener = create_hotkey_listener(
+                chord, on_toggle=self._reset_requested.emit
+            )
+            self.reset_listener.start()
+            log.info("Reset hotkey changed to %s", chord)
+        except Exception as exc:
+            log.warning("Could not register reset hotkey %r: %s", chord, exc)
+            self.reset_listener = None
+            self.tray.notify("Start-over hotkey not changed", str(exc))
+
+    def _edit_vocabulary(self) -> None:
+        """Edit the custom vocabulary and apply it without a restart.
+
+        Opened from the settings page, which has already silenced the hotkey and
+        invalidated the caret context for the whole visit.
+        """
         from pywhispr.ui.vocab_dialog import VocabularyDialog
         from pywhispr.vocab import (
             TEMPLATE,
@@ -1101,10 +1210,6 @@ class PyWhisprApp(QObject):
             save_vocabulary_text,
         )
 
-        # The dialog takes focus, so what we remembered inserting is no longer
-        # behind the caret; and a dictation pasted into the editor helps nobody.
-        self._context.invalidate()
-        self.listener.stop()
         try:
             edited = VocabularyDialog.edit(load_vocabulary_text() or TEMPLATE)
             if edited is not None:
@@ -1115,11 +1220,9 @@ class PyWhisprApp(QObject):
             # Losing the edit is annoying; losing the tray app is worse.
             log.exception("Could not save the vocabulary")
             self.tray.notify("Vocabulary not saved", str(exc))
-        finally:
-            self._resume_listeners()
 
     def _open_plugins_folder(self) -> None:
-        """Tray menu: show the plugins folder, creating it and its README if needed.
+        """Settings page: show the plugins folder, creating it and its README if needed.
 
         No dialog and no reload. A plugin is a file, it is read at startup, and
         saying so plainly beats a manager window that cannot honestly offer to
