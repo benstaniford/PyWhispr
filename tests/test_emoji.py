@@ -196,6 +196,60 @@ class TestNamesTheUnicodeDataMisses:
         assert convert("Gun emoji") == GUN
 
 
+class TestEmoteAsATrigger:
+    """"emote" works everywhere "emoji" does, and the two are interchangeable.
+
+    It is the riskier word, being an ordinary verb, so the prose cases below are
+    the point of this class rather than an afterthought.
+    """
+
+    @pytest.mark.parametrize(
+        ("said", "expected"),
+        [
+            ("Thumbs up emote", THUMBS_UP),
+            ("Devil emote", SMILING_DEVIL),
+            ("Angry devil emote", ANGRY_DEVIL),
+            ("I roll emote", "\U0001f644"),
+            ("Baby emote.", "\U0001f476"),
+        ],
+    )
+    def test_converts_like_emoji_does(self, said, expected):
+        assert convert(said) == expected
+
+    def test_absorbs_punctuation_like_emoji_does(self):
+        assert convert("Nice work, thumbs up emote.") == f"Nice work {THUMBS_UP}"
+
+    @pytest.mark.parametrize(
+        "said", ["Man emote gun emoji", "Man emoji gun emote", "Man emote gun emote"]
+    )
+    def test_a_chain_may_mix_the_two_words(self, said):
+        assert convert(said) == f"{MAN} {GUN}"
+
+    @pytest.mark.parametrize(
+        "said",
+        [
+            "He began to emote.",
+            "The actors emote well.",
+            "Try to emote more.",
+            "She could not emote.",
+            "Send me an emote.",
+            "Use the emote picker.",
+        ],
+    )
+    def test_the_verb_survives(self, said):
+        assert convert(said) == said
+
+    def test_neither_trigger_word_is_a_name(self):
+        """"emote" is two edits from "note", so the fuzzy tier would answer it."""
+        assert convert("Emote emote") == "Emote emote"
+        for word in emoji.TRIGGER_WORDS:
+            assert emoji._resolve(word) is None
+            assert emoji._fuzzy(word) is None
+
+    def test_every_trigger_word_compiles_to_a_pattern(self):
+        assert len(compile_patterns(emoji.TRIGGERS)) == len(emoji.TRIGGER_WORDS)
+
+
 class TestDevils:
     """Bare "devil" is the smiling one; the angry one has to be asked for."""
 

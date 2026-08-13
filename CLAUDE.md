@@ -294,8 +294,14 @@ opening word that join then decides about.
   entirety** — that is what separates "man emoji gun emoji" (two requests) from "I
   use the fire emoji and the water emoji", where "and the water" resolves to nothing
   and stays prose. `at_segment_end` remains a framework feature for user plugins.
-- **The trigger word is refused as a name.** The UCD has `EMOJI COMPONENT BALD` and
-  three siblings, so the prefix tier answered "emoji emoji" with a hairstyle.
+- **`TRIGGER_WORDS` is "emoji" *and* "emote"**, interchangeably, chains included.
+  "emote" is the riskier one — it is an ordinary verb — and it needs no extra guard
+  because the two existing ones already cover it: a request must end a clause or lead
+  a chain, *and* the words in front must name an emoji. "He began to emote." fails
+  both, since "began to" is not an emoji.
+- **A trigger word is refused as a name.** The UCD has `EMOJI COMPONENT BALD` and
+  three siblings, so the prefix tier answered "emoji emoji" with a hairstyle — and
+  "emote" is two edits from "note", so the fuzzy tier answers it with a notepad.
 - **Emoji resolves in four tiers, ordered by how much each is guessing**: literal
   (aliases → index exact/prefix/subset → the same with spaces stripped) → `HOMOPHONES`
   → `_fuzzy`. The ordering *is* the safety mechanism, not presentation: a loose tier

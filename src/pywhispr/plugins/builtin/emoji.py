@@ -1,10 +1,11 @@
 """Say "thumbs up emoji" and get the character.
 
 The words before the trigger are looked up as an emoji name, longest phrase
-first, and the whole lot — words and trigger — becomes one character. Nothing
-resolves, nothing happens: "send me an emoji" has no emoji name in front of it,
-so :func:`rewrite` returns ``None`` and the transcript is left exactly as it was.
-That is the guard, and it belongs here rather than in the engine because only
+first, and the whole lot — words and trigger — becomes one character. Either
+:data:`TRIGGER_WORDS` will do, "emoji" or "emote", and a chain may mix them.
+Nothing resolves, nothing happens: "send me an emoji" has no emoji name in front
+of it, so :func:`rewrite` returns ``None`` and the transcript is left exactly as it
+was. That is the guard, and it belongs here rather than in the engine because only
 this module knows what counts as an emoji name.
 
 Four tiers, ordered by how much each is guessing, so the loose ones only ever see
@@ -58,14 +59,21 @@ from pywhispr.vocab import edit_distance_within
 
 NAME = "emoji"
 
-TRIGGER_WORD = "emoji"
+# The words that ask for one. "emote" as well as "emoji" because people say both,
+# and they are interchangeable here — a chain may even mix them.
+#
+# "emote" is the riskier of the two, being an ordinary verb ("the actors emote"),
+# but it is protected by the same two things "emoji" is: a request has to end a
+# clause or lead a chain, *and* the words in front of it have to name an emoji. "He
+# began to emote." satisfies neither, because "began to" is not an emoji.
+TRIGGER_WORDS = ("emoji", "emote")
 
 # Every occurrence is offered and :func:`_is_a_request` decides which of them are
 # asking for an emoji rather than talking about one. That decision cannot be the
 # Trigger's ``at_segment_end``, tempting as it looks: a chain — "man emoji gun
 # emoji" — has an ordinary word after its first trigger, so the segment rule threw
 # the whole first half away before this module ever saw it.
-TRIGGERS = (Trigger(phrase=TRIGGER_WORD),)
+TRIGGERS = tuple(Trigger(phrase=word) for word in TRIGGER_WORDS)
 
 # Most words the name may span, counted back from the trigger. Four, like
 # vocab.MAX_PHRASE_WORDS: past that a spoken phrase is a sentence.
@@ -464,10 +472,11 @@ def _guarded(key: str) -> list[str] | None:
     words = key.split()
     if not words or len(key) < MIN_QUERY_CHARS:
         return None
-    if TRIGGER_WORD in words:
-        # The trigger word is not the name of anything. Worth stating outright,
-        # because the Unicode data has "EMOJI COMPONENT BALD" and three siblings,
-        # so the prefix tier answers "emoji" with a hairstyle.
+    if not set(words).isdisjoint(TRIGGER_WORDS):
+        # A trigger word is not the name of anything. Worth stating outright, because
+        # the Unicode data has "EMOJI COMPONENT BALD" and three siblings, so the
+        # prefix tier answers "emoji" with a hairstyle — and "emote" is two edits
+        # from "note", so the fuzzy tier answers it with a notepad.
         return None
     if all(word in CONTINUATION_WORDS for word in words):
         # "an emoji", "of the emoji": function words are never an emoji name, so
@@ -599,8 +608,8 @@ def _leads_a_chain(match: Match) -> bool:
     fire emoji and the water emoji" resolves to nothing and stays prose.
     """
     for index, word in enumerate(match.words_after):
-        if word.text.casefold() != TRIGGER_WORD:
-            continue
+        if word.text.casefold() not in TRIGGER_WORDS:
+            continue  # any trigger word closes a chain, so the two can be mixed
         if index == 0 or index > MAX_PHRASE_WORDS:
             return False  # "emoji emoji", or too far off to be one phrase
         run = match.words_after[:index]

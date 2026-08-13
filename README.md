@@ -286,7 +286,10 @@ ships with PyWhispr:
 
 > "That fixed it **thumbs up emoji**" → *That fixed it 👍*
 
-The words in front of `emoji` are looked up — the ~200 names people actually use,
+Say **"emote"** instead of "emoji" if you prefer — the two work identically, and a
+chain can mix them.
+
+The words in front of the trigger are looked up — the ~200 names people actually use,
 then every emoji name Unicode knows — and the whole lot becomes one character.
 Chain them and they all convert: *"man emoji gun emoji"* → 👨 🔫.
 
