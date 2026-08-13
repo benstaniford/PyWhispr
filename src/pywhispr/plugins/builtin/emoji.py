@@ -217,6 +217,22 @@ ALIASES: dict[str, str] = {
     "star struck": "\U0001f929",
     "pleading": "\U0001f97a",
     "wow": "\U0001f62e",
+    # Devils. Bare "devil" is the smiling one, because that is the one people mean
+    # when they do not say which — it is the teasing, mischievous one that gets used
+    # in conversation, where the angry one is a genuine insult. Two words beat one in
+    # the lookup loop, so "angry devil" is never reached through "devil".
+    #
+    # "angry face with horns" is here because that is 1F47F's *modern* name and the
+    # standard library only knows the Unicode 6 one, "IMP" — the same reason the
+    # gun and the hamburger need aliases. "smiling face with horns" resolves through
+    # the index already and is listed only so the pair reads as a pair.
+    "devil": "\U0001f608",
+    "devil face": "\U0001f608",
+    "smiling devil": "\U0001f608",
+    "smiling face with horns": "\U0001f608",
+    "angry devil": "\U0001f47f",
+    "angry devil face": "\U0001f47f",
+    "angry face with horns": "\U0001f47f",
     # hands and people
     "thumbs up": "\U0001f44d",
     "thumb up": "\U0001f44d",

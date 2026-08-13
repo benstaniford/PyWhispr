@@ -19,6 +19,8 @@ PARTY = "\U0001f389"
 SHRUG = "\U0001f937"
 MAN = "\U0001f468"
 GUN = "\U0001f52b"
+SMILING_DEVIL = "\U0001f608"
+ANGRY_DEVIL = "\U0001f47f"
 
 PLUGIN = Plugin(
     name="emoji",
@@ -192,6 +194,39 @@ class TestNamesTheUnicodeDataMisses:
 
     def test_through_the_whole_pass(self):
         assert convert("Gun emoji") == GUN
+
+
+class TestDevils:
+    """Bare "devil" is the smiling one; the angry one has to be asked for."""
+
+    @pytest.mark.parametrize(
+        ("said", "expected"),
+        [
+            ("devil", SMILING_DEVIL),
+            ("devil face", SMILING_DEVIL),
+            ("smiling devil", SMILING_DEVIL),
+            ("smiling face with horns", SMILING_DEVIL),
+            ("angry devil", ANGRY_DEVIL),
+            ("angry devil face", ANGRY_DEVIL),
+            ("angry face with horns", ANGRY_DEVIL),
+        ],
+    )
+    def test_resolves(self, said, expected):
+        assert emoji._resolve(said) == expected
+
+    def test_angry_beats_bare_devil(self):
+        """Two words win over one, the way "plus one" beats "one"."""
+        assert convert("Angry devil emoji") == ANGRY_DEVIL
+
+    def test_through_the_whole_pass(self):
+        assert convert("You are cheeky, devil emoji.") == f"You are cheeky {SMILING_DEVIL}"
+
+    def test_the_angry_one_needs_an_alias_because_unicode_calls_it_an_imp(self):
+        """1F47F's stdlib name is the Unicode 6 "IMP", so the modern name misses."""
+        assert "angry face with horns" not in emoji._index()
+
+    def test_a_chain_of_both(self):
+        assert convert("Devil emoji angry devil emoji") == f"{SMILING_DEVIL} {ANGRY_DEVIL}"
 
 
 class TestSquashedTier:
