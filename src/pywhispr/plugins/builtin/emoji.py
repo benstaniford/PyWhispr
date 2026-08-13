@@ -54,6 +54,7 @@ from functools import lru_cache
 
 from pywhispr.join import CONTINUATION_WORDS
 from pywhispr.plugins.api import Match, Rewrite, Trigger, Word
+from pywhispr.plugins.builtin._teams_emoji import load as load_custom
 from pywhispr.scratch import SEGMENT_BOUNDARY
 from pywhispr.vocab import edit_distance_within
 
@@ -574,6 +575,28 @@ def _fuzzy(key: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def _custom() -> dict[str, str]:
+    """Your tenant's own emoji, from the store beside ``vocabulary.txt``.
+
+    Nothing writes that store yet — see :mod:`_teams_emoji` for why every capture
+    route was rejected — so this resolves only what has been put there by hand.
+
+    Loaded lazily and cached, like the Unicode index: someone who has never
+    captured one should not pay for the file read.
+    """
+    return load_custom()
+
+
+def _custom_markup(phrase: str) -> str | None:
+    """The stored markup for `phrase`, if it names a captured custom emoji.
+
+    Checked before every Unicode tier and before the guards, for the same reason
+    ALIASES is: a captured emoji is a decision the user has already made by hand.
+    """
+    return _custom().get(_normalise(phrase))
+
+
 @lru_cache(maxsize=512)
 def _resolve(phrase: str) -> str | None:
     """The character `phrase` names, or None if it does not name one.
@@ -677,6 +700,25 @@ def rewrite(match: Match) -> Rewrite | None:
     for count in range(available, 0, -1):
         words = match.words_before[-count:]
         phrase = match.transcript[words[0].start : words[-1].end]
+
+        # A captured custom emoji first: it is the user's own, and it is the only
+        # kind that cannot be expressed as a character at all.
+        markup = _custom_markup(phrase)
+        if markup is not None:
+            start, end, separator = _claim_span(match, words[0])
+            # The separator goes into *both* renderings, because the rich span
+            # covers the whole replacement: leave it out of the markup and the
+            # image is spliced over the space, arriving glued to the word before it.
+            #
+            # The plain text is the emoji's name, which is what Teams' own copy
+            # degrades to and what anywhere without HTML will show.
+            return match.claim(
+                start,
+                end,
+                f"{separator}{_normalise(phrase)}",
+                html=f"{separator}{markup}",
+            )
+
         character = _resolve(phrase)
         if character is not None:
             start, end, separator = _claim_span(match, words[0])

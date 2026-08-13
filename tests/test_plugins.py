@@ -287,6 +287,60 @@ class TestActionRunner:
         assert runner.dispatch([PendingAction(plugin, Match("marker", 0, 6))]) == 0
 
 
+class TestRichSpans:
+    """Markup travels beside the plain text, never inside it.
+
+    A Teams custom emoji has no codepoint, so it cannot be expressed as text at
+    all. The transcript therefore stays plain — the join, the history and the
+    network API are unaffected — and the markup is a second rendering used only
+    where the paste target accepts HTML.
+    """
+
+    @staticmethod
+    def _marked(replacement="NAME", markup="<img alt='NAME'>"):
+        def rewrite(match: Match) -> Rewrite | None:
+            if not match.words_before:
+                return None
+            return match.claim_from(match.words_before[-1], replacement, html=markup)
+
+        return make_plugin(rewrite=rewrite)
+
+    def test_the_span_lands_on_the_replacement(self):
+        result = apply_plugins("say the marker now", [self._marked()])
+        assert result.text == "say NAME now"  # claim_from eats "the marker"
+        (start, end, markup) = result.rich[0]
+        assert result.text[start:end] == "NAME"
+        assert markup == "<img alt='NAME'>"
+
+    def test_several_spans_all_map_correctly(self):
+        result = apply_plugins("a x marker and b y marker", [self._marked()])
+        assert [result.text[s:e] for s, e, _ in result.rich] == ["NAME", "NAME"]
+
+    def test_a_plugin_without_markup_produces_no_spans(self):
+        assert apply_plugins("a marker", [make_plugin(rewrite=claim_all("X"))]).rich == ()
+
+    def test_markup_that_is_not_a_string_is_refused_whole(self):
+        """And the text is left alone too: a half-applied claim is worse than none."""
+
+        def rewrite(match):
+            return Rewrite(match.start, match.end, "X", html=object())
+
+        result = apply_plugins("a marker", [make_plugin(rewrite=rewrite)])
+        assert result.text == "a marker"
+        assert result.rich == ()
+
+    def test_oversized_markup_is_refused(self):
+        big = "<i>" + "y" * MAX_REPLACEMENT_CHARS + "</i>"
+        result = apply_plugins("a marker", [self._marked(markup=big)])
+        assert result.text == "a marker"
+        assert result.rich == ()
+
+    def test_the_plain_text_is_still_usable_on_its_own(self):
+        """Whatever HTML would have shown, the text has to read sensibly."""
+        result = apply_plugins("nice work marker", [self._marked(replacement="frown")])
+        assert result.text == "nice frown"
+
+
 class TestReentrancy:
     """A rewrite does not get the GUI thread to itself, so the engine must be safe
     to call from several at once.

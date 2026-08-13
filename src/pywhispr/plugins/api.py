@@ -99,18 +99,18 @@ class Match:
     def trigger_text(self) -> str:
         return self.transcript[self.start : self.end]
 
-    def claim(self, start: int, end: int, text: str) -> Rewrite:
+    def claim(self, start: int, end: int, text: str, html: str | None = None) -> Rewrite:
         """Convenience for the usual shape: replace a span with a string."""
-        return Rewrite(start=start, end=end, text=text)
+        return Rewrite(start=start, end=end, text=text, html=html)
 
-    def claim_from(self, word: Word, text: str) -> Rewrite:
+    def claim_from(self, word: Word, text: str, html: str | None = None) -> Rewrite:
         """Replace everything from `word` up to the end of the trigger with `text`.
 
         The common case for a trailing-keyword plugin: "thumbs up emoji" becomes
         one character, and the space in front of "thumbs" is left alone because
         the claim starts where the word does.
         """
-        return Rewrite(start=word.start, end=self.end, text=text)
+        return Rewrite(start=word.start, end=self.end, text=text, html=html)
 
     def nothing_to_change(self) -> Rewrite:
         """Claim the match without altering any text.
@@ -127,11 +127,20 @@ class Rewrite:
 
     Half-open, like a slice: ``transcript[start:end]`` becomes ``text``. A
     zero-width span is legal and means "mine, but change nothing".
+
+    ``html`` is optional markup for things plain text cannot say — a Teams custom
+    emoji is an ``<img>`` referencing a tenant asset, not a character. It is a
+    *second rendering* of ``text``, never a substitute for it: the transcript stays
+    plain throughout the pipeline, so the join, the history and the network API are
+    unaffected, and the markup is used only when the paste target accepts HTML. So
+    ``text`` must still be something the user would be content to receive — the
+    emoji's name, say — because that is what they get anywhere HTML does not reach.
     """
 
     start: int
     end: int
     text: str
+    html: str | None = None
 
 
 __all__ = [

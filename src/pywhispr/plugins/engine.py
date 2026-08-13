@@ -90,6 +90,11 @@ class PluginResult:
     text: str
     actions: tuple[PendingAction, ...] = ()
     rewrites: int = 0
+    # (start, end, html) over `text`, for replacements that supplied markup. In
+    # *output* coordinates, because the caller has no way to map input ones once
+    # the splicing has moved everything along. Empty for the overwhelmingly common
+    # case of a pass with nothing rich in it.
+    rich: tuple[tuple[int, int, str], ...] = ()
 
 
 def compile_trigger(trigger: Trigger) -> re.Pattern[str] | None:
@@ -238,6 +243,12 @@ def _validated(claim: object, match: Match, plugin: Plugin) -> Rewrite | None:
             match.window_end,
         )
         return None
+    if claim.html is not None and not isinstance(claim.html, str):
+        log.error("Plugin %r claimed %s markup, not a string", plugin.name, type(claim.html).__name__)
+        return None
+    if claim.html is not None and len(claim.html) > MAX_REPLACEMENT_CHARS:
+        log.error("Plugin %r produced %d characters of markup", plugin.name, len(claim.html))
+        return None
     if len(claim.text) > MAX_REPLACEMENT_CHARS:
         log.error(
             "Plugin %r produced %d characters, over the %d limit",
@@ -310,10 +321,19 @@ def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
         return PluginResult(text=text, actions=tuple(actions))
 
     out: list[str] = []
+    rich: list[tuple[int, int, str]] = []
     cursor = 0
+    written = 0  # how many characters of output exist so far
     for claim in sorted(accepted, key=lambda item: item.start):
-        out.append(text[cursor : claim.start])
+        kept = text[cursor : claim.start]
+        out.append(kept)
+        written += len(kept)
+        if claim.html is not None:
+            # Where this replacement ended up, so the injector can render markup
+            # around it without re-deriving the arithmetic.
+            rich.append((written, written + len(claim.text), claim.html))
         out.append(claim.text)
+        written += len(claim.text)
         cursor = claim.end
     out.append(text[cursor:])
 
@@ -321,4 +341,9 @@ def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
     log.debug(
         "Plugins rewrote %d span(s) and queued %d action(s)", len(accepted), len(actions)
     )
-    return PluginResult(text="".join(out), actions=tuple(actions), rewrites=len(accepted))
+    return PluginResult(
+        text="".join(out),
+        actions=tuple(actions),
+        rewrites=len(accepted),
+        rich=tuple(rich),
+    )

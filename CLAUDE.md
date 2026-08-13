@@ -236,6 +236,66 @@ about spelling, unlike joining, which needs a caret.
   the *developer's real* vocabulary file. The `app` fixture patches it (and
   `create_hotkey_listener`, which was quietly claiming a real global hotkey).
 
+## Rich paste (`richclip.py` + `custom_emoji.py`)
+
+Some things cannot be said in plain text. A Teams custom emoji has no codepoint —
+it is a tenant-hosted image behind an `<img itemid=...>` inside a marker element —
+so the only way to hand one to another app is HTML on the clipboard.
+
+- **`QMimeData.setHtml()` is unusable on Windows, and the failure is silent.** It
+  writes a `CF_HTML` whose header is valid but whose *document* is not: `StartHTML`
+  points straight at `<!--StartFragment-->` with no `<html>`/`<body>` root. WebView2
+  apps like Teams ignore the whole payload and take the plain-text alternative, which
+  looks exactly like "Teams refuses pasted HTML" and is not. Wrap the same fragment
+  in a real document and it renders — custom emoji, bold, links, all of it. Hence
+  the hand-built header in `richclip.build_cf_html`, and hence `injector._set_rich`
+  deliberately not using Qt. **Diagnosing this needs the raw bytes**: enumerate the
+  clipboard with `EnumClipboardFormats` and read `"HTML Format"` back, because every
+  higher-level view of it looked correct.
+- **The transcript stays plain text end to end.** `Rewrite.html` is a *second
+  rendering* carried alongside, and `PluginResult.rich` reports where each one landed
+  in **output** coordinates. So `join`, `history` and `_api_transcribe` are untouched
+  and keep their invariants — the alternative, letting markup into the transcript,
+  would have made `_joined`'s "text untouched" check meaningless.
+- `Rewrite.text` must therefore still be something the user would accept: the emoji's
+  *name*. That is what arrives wherever HTML does not reach, which is the same way
+  Teams' own copy degrades, and it is why a failure here costs formatting rather
+  than words.
+- **The separator goes in both renderings.** A rich span covers the whole
+  replacement, so markup that omits the leading space is spliced over it and the
+  image arrives glued to the previous word.
+- `app._shifted_rich` moves spans by whatever the join prepended (0 or 1). Its
+  "text moved unexpectedly" branch is unreachable via `_joined`, whose own tripwire
+  fires first — belt-and-braces, and tested directly rather than through the pipeline.
+- **Rich spans are GUI-thread state for one dictation cycle**, set only when
+  `collect_actions` is true. A network request runs the same pass on its own thread
+  and must not touch them; there is a test for exactly that.
+- Custom emoji markup can only be **captured**, never derived — there is no
+  documented API for listing a tenant's emoji — and **nothing captures it yet**.
+  `_teams_emoji.extract()` works and is tested; it simply has no caller. Every route
+  was rejected for a reason worth keeping: `act` runs after the injector has already
+  overwritten the clipboard; `rewrite` must be reentrant and I/O-free and also runs
+  on API request threads; a `pywhispr` subcommand puts Teams into the main program's
+  command surface, which is what the framework exists to prevent; and a tray entry
+  needs plugins to declare menu actions generically, which nobody has asked for.
+  So the store is read-only in practice — hand-editing `custom_emoji.json` works.
+- The store is JSON rather than a `vocabulary.txt`-style line format because the
+  fragments are hundreds of characters of markup; a hand-editable one-per-line file
+  would be a fiction, though deleting an entry still works.
+- **Nothing in the main program knows what an emoji is.** `_teams_emoji.py` lives
+  inside `plugins/builtin/` with a leading underscore, imported only by `emoji.py`.
+  An earlier version put it in `pywhispr/` and gave `cli.py` a `learn-emoji`
+  subcommand — 19 emoji references in the main CLI — which contradicted this file's
+  own claim that the framework knows nothing about emoji. `richclip.py` is the
+  exception that proves the rule: it stays in the main package because its code is
+  generic (text + spans → HTML) and `injector.py` is its real consumer.
+- The stored fragments are **tenant-scoped** (image URLs fetched with the viewer's
+  credentials), so the store is not shareable configuration.
+- macOS `NSPasteboard` path is written from the documented API and **unverified on a
+  real machine**; every failure returns False and falls back to plain text.
+- Testing gotcha: `isolated_app` patches `plugins.builtin._teams_emoji.load` too, or
+  the suite reads whatever the developer happens to have in their own store.
+
 ## Plugins (`plugins/` + `plugins/builtin/emoji.py`)
 
 The other passes each do one fixed job; this is the open-ended one — a phrase the
