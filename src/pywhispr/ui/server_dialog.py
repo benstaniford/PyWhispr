@@ -2,7 +2,7 @@
 
 Lite runs no model of its own; it sends audio to a PyWhispr server's
 ``/v1/transcribe``. This asks for that server's address — on first run when none
-is set, and again from the tray's "Set server…" entry. A plain text field: the
+is set. The settings page has the same field. A plain text field: the
 value is one URL, and the placeholder shows the shape it should take.
 """
 

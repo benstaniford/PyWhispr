@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -52,3 +52,47 @@ def test_level_is_monotonic_in_amplitude():
     levels = [rms_level(a * base) for a in (0.01, 0.05, 0.2, 0.8)]
     assert levels == sorted(levels)
     assert all(0.0 <= lv <= 1.0 for lv in levels)
+
+
+class TestDeviceLookup:
+    """Devices are persisted by name: an index is a position in a list that
+    renumbers whenever any other device is unplugged."""
+
+    def _query(self, *names):
+        return [
+            {"name": name, "max_input_channels": channels} for name, channels in names
+        ]
+
+    def test_only_devices_that_can_record_are_listed(self):
+        import sys
+        from unittest.mock import MagicMock as M
+
+        fake = M()
+        fake.query_devices.return_value = self._query(("Speakers", 0), ("Yeti", 2))
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            from pywhispr.audio import input_devices
+
+            assert input_devices() == [(1, "Yeti")]
+
+    def test_a_portaudio_that_will_not_answer_is_no_devices(self):
+        import sys
+        from unittest.mock import MagicMock as M
+
+        fake = M()
+        fake.query_devices.side_effect = OSError("no PortAudio")
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            from pywhispr.audio import input_devices
+
+            assert input_devices() == []
+
+    def test_find_device_returns_the_current_index(self):
+        with patch("pywhispr.audio.input_devices", return_value=[(0, "Array"), (3, "Yeti")]):
+            from pywhispr.audio import find_device
+
+            assert find_device("Yeti") == 3
+
+    def test_an_absent_device_is_none_rather_than_a_guess(self):
+        with patch("pywhispr.audio.input_devices", return_value=[(0, "Array")]):
+            from pywhispr.audio import find_device
+
+            assert find_device("Yeti") is None

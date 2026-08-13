@@ -56,18 +56,44 @@ this. (On Windows, double-tap works without any special permission.)
 - A failed model load no longer quits the app — it stays in the tray and reports the
   error. See [Logs & troubleshooting](#logs--troubleshooting).
 
+## Settings
+
+Tray menu → **Settings…**. Three tabs:
+
+- **Dictation** — the hotkey, the start-over hotkey, the microphone, the
+  auto-stop guard, start/stop sounds, and ducking other applications.
+- **Text** — filler removal, continuation joining, the custom vocabulary (and its
+  editor), and the spoken start-over phrases.
+- **Advanced** — plugins, GPU acceleration, the network API (or, in the Lite
+  build, the transcription server), and buttons for the config and log files.
+
+Everything applies on **Save**, on the next dictation, except the network API and
+the plugin switches: the socket is bound and the plugins imported at startup, so
+changing those says a restart is needed rather than pretending. The **tray menu**
+itself keeps only what you reach mid-sentence — start/stop, recent dictations,
+settings, quit.
+
+The microphone list is by device *name*, so unplugging something else does not
+quietly move your choice. If the one you picked is not connected, PyWhispr
+records with the system default and tells you which and why.
+
 ## Configuration
 
 `~/Library/Application Support/PyWhispr/config.toml` (macOS) or
-`%APPDATA%\PyWhispr\config.toml` (Windows) — also reachable via the tray menu.
+`%APPDATA%\PyWhispr\config.toml` (Windows) — also reachable from **Settings… →
+Advanced → Open config file**.
+
+Most of these have a control on the **settings page** (tray menu → **Settings…**);
+the rest are typed once and left alone, which is why they are not on it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via tray menu → **Change hotkey…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
-| `input_device` | system default | Microphone index from `pywhispr devices` |
+| `hotkey` | `<cmd>+<shift>+<space>` / `<ctrl>+<alt>+<space>` | Toggle hotkey — easiest to change via **Settings… → Dictation → Hotkey → Change…**, which records a keypress. Either a chord (modifiers + a letter, digit, `<space>`, arrows/navigation keys or `<f1>`–`<f20>`) or a modifier double-tap like `double-tap:<alt>` |
+| `input_device_name` | system default | The microphone, by name — set it from **Settings… → Dictation → Microphone**. Names rather than indices because an index renumbers when any other device is unplugged. Not connected right now? PyWhispr records with the system default and says so |
+| `input_device` | system default | Microphone *index* from `pywhispr devices`. Still honoured, and still what an older config uses; `input_device_name` wins where both are set |
 | `model_override` | platform default | Any compatible HuggingFace repo id |
 | `model_quantization` | none | Windows/Linux only: `"int8"` loads the quantised model — noticeably faster on the CPU, small accuracy cost. See [Speed](#speed) |
-| `use_gpu` | `true` | Windows/Linux only: `false` stops GPU acceleration being used without deleting its libraries — tray menu → **Disable GPU acceleration…** sets it. See [Speed](#speed) |
+| `use_gpu` | `true` | Windows/Linux only: `false` stops GPU acceleration being used without deleting its libraries — **Settings… → Advanced → GPU acceleration → Disable…** sets it. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
 | `duck_other_audio` | `false` | Windows only: turn other applications' audio down while recording and put it back when the recording stops |
@@ -81,7 +107,7 @@ this. (On Windows, double-tap works without any special permission.)
 | `remove_fillers` | `true` | Drop *um*, *uh*, *erm* and friends from the transcript — see [Filler removal](#filler-removal) |
 | `extra_filler_words` | `[]` | More terms to drop, e.g. `["you know", "hmm", "like"]` (a phrase only matches those words next to each other) |
 | `keep_filler_words` | `[]` | Built-in fillers to leave alone, e.g. `["er", "well"]` |
-| `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via tray menu → **Vocabulary…** |
+| `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via **Settings… → Text → Edit vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `plugins_enabled` | `true` | Run [plugins](#plugins) — a phrase you say and what happens when you say it |
 | `plugin_actions_enabled` | `true` | Let plugins do things as well as rewrite text. `false` keeps their text changes and stops anything reaching outside PyWhispr |
@@ -204,20 +230,20 @@ libraries, including a cuFFT build that is only on NVIDIA's own index; PyWhispr
 puts the pip CUDA wheels' DLL directories on the search path itself, since nothing
 else does.
 
-Tray menu → **Enable GPU acceleration…** does the download, and the same entry
-reads **Disable GPU acceleration…** once it is on — that switches it off without
+**Settings… → Advanced → GPU acceleration → Enable…** does the download, and the
+same button reads **Disable…** once it is on — that switches it off without
 deleting anything, so turning it back on needs no second download.
 `pywhispr disable-gpu` is the one that removes the libraries and frees the space.
 
-macOS uses the MLX backend, where none of this applies — and where the tray entry
-is therefore not shown at all.
+macOS uses the MLX backend, where none of this applies — and where the row is
+therefore not shown at all.
 
 
 ## Custom vocabulary
 
 Product names, colleagues, codenames and jargon come out of any speech model
 spelled the way an ordinary English speaker would write them: *beyond trust*,
-*pie whisper*, *cubernetes*. Tray menu → **Vocabulary…** opens a list of terms,
+*pie whisper*, *cubernetes*. **Settings… → Text → Edit vocabulary…** opens a list of terms,
 spelled the way you want them written:
 
 ```
@@ -279,7 +305,7 @@ left"*) is left alone.
 
 ### Writing one
 
-Tray menu → **Open plugins folder…**, drop in a `.py` file, restart. A plugin is
+**Settings… → Advanced → Plugins → Open folder…**, drop in a `.py` file, restart. A plugin is
 a module with a `TRIGGERS` list and either or both of two functions:
 
 ```python
@@ -457,8 +483,8 @@ room to add it without breaking these clients.
 ## Logs & troubleshooting
 
 If the app misbehaves — the overlay says *Loading model…* forever, the hotkey
-does nothing, the tray icon disappears — the log has the answer. Tray menu →
-**Open log file**, or find it at:
+does nothing, the tray icon disappears — the log has the answer. **Settings… →
+Advanced → Open log file**, or find it at:
 
 | | |
 |---|---|

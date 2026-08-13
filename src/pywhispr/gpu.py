@@ -2,7 +2,7 @@
 
 CUDA (``cuda.py``) and DirectML (``directml.py``) are alternatives, and everything
 outside them wants to ask about "GPU acceleration" rather than about either one.
-This is that question, plus the switch behind the tray menu's Enable/Disable entry.
+This is that question, plus the switch behind the settings page's Enable/Disable button.
 
 Deliberately Qt-free and cheap to import: ``cuda`` and ``directml`` are imported
 inside the functions, both because they pull in ``storage``/``config`` and because
@@ -45,7 +45,7 @@ def installed() -> bool:
 def active(cfg: Config) -> bool:
     """Is GPU acceleration both installed and switched on?
 
-    What the tray menu's label asks. Not "is a GPU provider loaded": that is False
+    What the settings page's button label asks. Not "is a GPU provider loaded": that is False
     between enabling and the restart it needs, which would offer to enable it twice.
     """
     return bool(cfg.use_gpu) and installed()

@@ -42,7 +42,12 @@ class Config:
     # Pressed mid-recording: drop what has been said so far and keep recording,
     # for when the sentence came out wrong. "" turns it off.
     reset_hotkey: str = dataclasses.field(default_factory=default_reset_hotkey)
+    # Which microphone. input_device_name is what the settings page writes and
+    # what wins: PortAudio indices are positions in a list that renumbers when
+    # any other device is unplugged. input_device (an index) is still honoured
+    # for configs written before names existed, and when no name is set.
     input_device: int | None = None  # None = system default microphone
+    input_device_name: str | None = None
     model_override: str | None = None  # HuggingFace repo id; None = platform default
     # ONNX (Windows/Linux) only. None (the default) chooses: "int8" when the model
     # ends up on the CPU, where it is ~2x faster, and full precision on the GPU,
@@ -53,7 +58,7 @@ class Config:
     # PyWhispr's tuned default; 0 restores onnxruntime's.
     stt_threads: int | None = None
     # Offer the one-time CUDA download when there is an NVIDIA GPU going unused.
-    # Set false (or answer "Never") to stop asking; the tray menu still has it.
+    # Set false (or answer "Never") to stop asking; the settings page still has it.
     offer_gpu_setup: bool = True
     # Where the gigabytes go. None keeps the platform defaults (the Hugging Face
     # cache and the app's data directory, both on the system drive); set either to
@@ -62,7 +67,7 @@ class Config:
     cuda_dir: str | None = None
     directml_dir: str | None = None
     # GPU acceleration itself, once its libraries are downloaded. False turns it off
-    # without deleting the ~1.2 GB — the tray menu's "Disable GPU acceleration", so
+    # without deleting the ~1.2 GB — the settings page's "Disable…", so
     # turning it back on costs no download. "pywhispr disable-gpu" is the one that
     # deletes. Outranks use_directml: off means off, whichever path is installed.
     use_gpu: bool = True
@@ -100,12 +105,12 @@ class Config:
     # turns it off. See scratch.py.
     voice_reset_phrases: list[str] = dataclasses.field(default_factory=lambda: ["clear clear"])
     # Custom vocabulary: correct the transcript's spelling of terms listed in
-    # vocabulary.txt (tray menu → Vocabulary…). vocabulary_fuzzy also fixes a
+    # vocabulary.txt (Settings… → Text → Edit vocabulary…). vocabulary_fuzzy fixes a
     # near miss on longer terms; turn it off to only ever match them exactly.
     vocabulary_enabled: bool = True
     vocabulary_fuzzy: bool = True
-    # Plugins: a phrase you say, and what happens when you say it (tray menu →
-    # Open plugins folder…). plugins_enabled is the master switch;
+    # Plugins: a phrase you say, and what happens when you say it (Settings… →
+    # Advanced → Open folder…). plugins_enabled is the master switch;
     # plugin_actions_enabled leaves plugins able to rewrite text but stops them
     # doing anything else, which is the half that can reach outside PyWhispr.
     # Per-plugin: [plugins.<name>] enabled = false. See plugins/registry.py.

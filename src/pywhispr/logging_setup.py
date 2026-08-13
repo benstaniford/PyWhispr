@@ -5,7 +5,7 @@ Why this exists: the Windows build is a console-less GUI executable, so
 When the app misbehaves there — the model never finishes loading, a hotkey does
 nothing, the process dies without a window — a **file** is the only evidence.
 So logging always goes to a rotating file in the platform log directory, and
-the tray menu can open it.
+the settings page can open it.
 
 Two files are written, both in :func:`log_dir`:
 
