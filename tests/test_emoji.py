@@ -194,6 +194,124 @@ class TestNamesTheUnicodeDataMisses:
         assert convert("Gun emoji") == GUN
 
 
+class TestSquashedTier:
+    """People say compounds as one word, and the model writes them that way."""
+
+    @pytest.mark.parametrize(
+        ("said", "expected"),
+        [("eyeroll", "\U0001f644"), ("thumbsup", THUMBS_UP), ("checkmark", "\U00002705")],
+    )
+    def test_a_spaceless_compound_resolves(self, said, expected):
+        assert emoji._resolve(said) == expected
+
+    def test_a_mis_split_phrase_resolves(self):
+        """"thumb sup" is "thumbsup" once the spaces go — an exact hit, not a guess."""
+        assert emoji._resolve("thumb sup") == THUMBS_UP
+
+    def test_through_the_whole_pass(self):
+        assert convert("Eyeroll emoji.") == "\U0001f644"
+
+    def test_curated_aliases_win_over_index_names(self):
+        squashed = emoji._squashed()
+        assert squashed["thumbsup"] == THUMBS_UP
+        assert squashed["redheart"] == HEART
+
+
+class TestHomophoneTier:
+    """The model writes a word that sounds right and means something else.
+
+    "I roll" for "eyeroll" is the case that motivated all of this, and it is
+    unreachable by letter-level matching: "iroll" is one edit from "troll" and
+    three from "eyeroll", so the fuzzy tier alone answers confidently and wrongly.
+    """
+
+    @pytest.mark.parametrize(
+        ("said", "expected"),
+        [
+            ("i roll", "\U0001f644"),
+            ("hi five", "\U0001f64c"),
+            ("plus won", THUMBS_UP),
+            ("read heart", HEART),
+            ("czech mark", "\U00002705"),
+            ("waiving hand", "\U0001f44b"),
+            ("preying hands", "\U0001f64f"),
+        ],
+    )
+    def test_a_misheard_spelling_resolves(self, said, expected):
+        assert emoji._resolve(said) == expected
+
+    def test_the_case_from_the_bug_report(self):
+        assert convert("I roll emoji") == "\U0001f644"
+        assert convert("That is so annoying, I roll emoji") == "That is so annoying \U0001f644"
+
+    def test_the_literal_spelling_always_wins(self):
+        """"one hundred" must resolve as itself, never by way of "won"."""
+        assert emoji._resolve("one hundred") == "\U0001f4af"
+
+    def test_a_substituted_word_never_reaches_the_text(self):
+        """The map transforms a lookup key, so "eye" cannot land in the sentence.
+
+        This is the property that makes the map safe here and would not make it
+        safe as a general vocabulary pass.
+        """
+        assert "eye" not in convert("I roll emoji")
+
+    def test_variants_are_capped(self):
+        many = " ".join(["i"] * 8)
+        assert len(emoji._homophone_variants(many)) <= emoji.MAX_HOMOPHONE_VARIANTS
+
+    def test_a_phrase_with_no_homophones_makes_no_variants(self):
+        assert emoji._homophone_variants("thumbs up") == []
+
+    def test_every_mapping_reaches_a_real_name(self):
+        """An entry whose target appears in no emoji name is dead weight.
+
+        Checked against the words of every alias and Unicode name rather than
+        against _resolve, because a target may only be meaningful inside a phrase:
+        "one" alone is a function word with no emoji, but "plus one" and "one
+        hundred" are both aliases, so won -> one earns its place.
+        """
+        words = set()
+        for key in emoji.ALIASES:
+            words.update(key.split())
+        for name in emoji._index():
+            words.update(name.split())
+        assert [w for w in emoji.HOMOPHONES.values() if w not in words] == []
+
+    def test_no_mapping_is_circular(self):
+        """A target that is itself a key would make the variant order matter."""
+        assert not set(emoji.HOMOPHONES) & set(emoji.HOMOPHONES.values())
+
+
+class TestFuzzyTier:
+    """Last resort, and the only tier that can be wrong about a correct name."""
+
+    @pytest.mark.parametrize(
+        ("said", "expected"),
+        [("partly popper", PARTY), ("rockit", ROCKET), ("banna", "🍌")],
+    )
+    def test_a_near_miss_resolves(self, said, expected):
+        assert emoji._resolve(said) == expected
+
+    def test_function_words_never_reach_it(self):
+        """Without the shared guard, "the" is two edits from "tree"."""
+        assert emoji._resolve("the") is None
+        assert emoji._resolve("of the") is None
+
+    def test_too_short_to_risk_an_edit(self):
+        assert emoji._fuzzy("abc") is None  # under MIN_FUZZY_CHARS
+
+    def test_the_trigger_word_never_reaches_it(self):
+        assert emoji._fuzzy("emoji") is None
+
+    def test_a_tie_is_no_answer(self, monkeypatch):
+        """Two names equally close means neither, as vocab decides it too."""
+        monkeypatch.setattr(
+            emoji, "_squashed", lambda: {"aaaax": "\U0001f600", "aaaay": "\U0001f601"}
+        )
+        assert emoji._fuzzy("aaaaz") is None
+
+
 class TestUnicodeNameTier:
     """The long tail, which comes from unicodedata rather than the alias table."""
 
@@ -249,7 +367,15 @@ class TestResolve:
         assert emoji._resolve("  thumbs   up  ") == THUMBS_UP
 
     def test_refuses_something_too_short_to_mean_anything(self):
-        assert emoji._resolve("ok") is None  # under MIN_QUERY_CHARS
+        assert emoji._resolve("zz") is None  # under MIN_QUERY_CHARS
+
+    def test_but_a_curated_alias_works_however_short(self):
+        """The table outranks the length guard, or a listed term is dead code.
+
+        "ok" is exactly that: two characters, in ALIASES, and refused by
+        MIN_QUERY_CHARS until the alias lookup moved ahead of it.
+        """
+        assert emoji._resolve("ok") == "\U0001f44c"
 
     def test_refuses_function_words(self):
         assert emoji._resolve("the") is None

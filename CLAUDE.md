@@ -296,6 +296,33 @@ opening word that join then decides about.
   and stays prose. `at_segment_end` remains a framework feature for user plugins.
 - **The trigger word is refused as a name.** The UCD has `EMOJI COMPONENT BALD` and
   three siblings, so the prefix tier answered "emoji emoji" with a hairstyle.
+- **Emoji resolves in four tiers, ordered by how much each is guessing**: literal
+  (aliases → index exact/prefix/subset → the same with spaces stripped) → `HOMOPHONES`
+  → `_fuzzy`. The ordering *is* the safety mechanism, not presentation: a loose tier
+  only ever sees what the strict ones could not reach.
+  - **`I roll emoji` used to give 🧻.** Not a phonetics failure — `"i roll"` resolved
+    to nothing, so the longest-first loop fell back to the single word `"roll"`, which
+    prefix-matches `ROLL OF PAPER`. The homophone tier now answers at two words, so
+    the one-word fallback is never reached. **That fallback hazard is still live for
+    any other failed multi-word phrase** and was left alone deliberately: restricting
+    single-word queries would cost real hits like "pizza" (`SLICE OF PIZZA`) and
+    "beer" (`BEER MUG`).
+  - **Soundex and friends were measured and rejected.** 16 of ~200 alias keys and 105
+    of 2,783 index names collide (`cry`/`car`, `smile`/`snail`, `taco`/`taxi`), *and*
+    they miss `i`/`eye` and `hi`/`high` outright because they preserve the first
+    letter — so they fail on both accuracy and the cases that motivated the work.
+    Edit distance alone is worse than useless here: `iroll` is **one** edit from
+    `troll` and three from `eyeroll`, so it answers confidently with a troll.
+  - **`HOMOPHONES` never reaches the text.** It rewrites a *lookup key*, and the words
+    are then replaced by one character, so "eye" cannot land in the user's sentence.
+    That is why the same map must not become a general vocabulary pass, where "I"
+    would become "eye" in prose. Entries are exact-sound-equal only, must have a
+    target that appears in some real emoji name (tested), and pairs where *both*
+    spellings name a different emoji are omitted — knight/night, role/roll.
+  - `_guarded` is shared by every tier below the alias table, because the fuzzy tier
+    without the function-word check answers "the" with 🌳 (two edits from "tree").
+  - The alias table is checked **before the length guard** too: "ok" is two characters
+    and was silently dead in the table until that ordering.
 - **21 aliases exist purely because the legacy names are unreachable by ear**: 🔫 is
   `PISTOL`, 🍔 is `HAMBURGER`, ⛳ is `FLAG IN HOLE`. Verify a codepoint's real
   `unicodedata.name` before adding one — `U+1FA9B` is `SCREWDRIVER`, not a drill,
@@ -327,6 +354,13 @@ opening word that join then decides about.
 - Testing gotcha: `isolated_app` patches `load_plugins` as well as
   `load_vocabulary`. Without it the suite loads the *developer's* plugins folder,
   and a plugin of theirs with an `act()` would really run.
+- Testing gotcha: **any test that stops a recording must keep mocks off the worker
+  thread.** `TestAudioDucking` asserted on its `ducker` mock while the STT worker was
+  reaching `backend.transcribe` on another — a latent race that sat harmless for
+  months and then hung the suite the moment unrelated work shifted the timing. It
+  reports as a hang at whichever test was running, so it looks like a *new* failure
+  in innocent code. `_ducked` installs a plain `SimpleNamespace` backend now.
+  `TestContinuationJoin` was always safe because `wait_for_worker` drains first.
 - Testing gotcha: **do not drive app code from a second thread in `test_app.py`.**
   `unittest.mock` is not thread-safe, so reaching the fixture's mocks off the main
   thread wedges a *later* test whose main thread and STT worker both build child

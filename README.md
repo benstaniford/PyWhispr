@@ -286,9 +286,24 @@ ships with PyWhispr:
 
 > "That fixed it **thumbs up emoji**" → *That fixed it 👍*
 
-The words in front of `emoji` are looked up — the ~220 names people actually use,
+The words in front of `emoji` are looked up — the ~200 names people actually use,
 then every emoji name Unicode knows — and the whole lot becomes one character.
 Chain them and they all convert: *"man emoji gun emoji"* → 👨 🔫.
+
+It also copes with the model getting the words slightly wrong, which it does
+constantly, in four tiers that get progressively more forgiving:
+
+| You say | Transcribed as | |
+|---|---|---|
+| eyeroll | `eyeroll` | spaces are optional, so compounds work |
+| thumbs up | `thumb sup` | and so is where the model put them |
+| eyeroll | `I roll` | homophones: `I`/`eye`, `hi`/`high`, `won`/`one`, `czech`/`check` |
+| party popper | `partly popper` | a near miss, when only one name is that near |
+
+Each tier only sees what the stricter ones above it could not resolve, which is
+what keeps the forgiving ones out of trouble: *"I roll"* becomes 🙄 at the
+homophone tier, so the fuzzy tier never gets to notice that `iroll` is one letter
+from `troll`.
 
 Say something that names no emoji and nothing happens at all: *"send me an
 emoji"* is left exactly as you said it. A request also has to either end a clause

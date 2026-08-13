@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -976,6 +977,13 @@ class TestAudioDucking:
 
     def _ducked(self, app):
         app.ducker = MagicMock()
+        # A plain stub, not the fixture's MagicMock. Stopping a recording submits a
+        # transcription, so the worker thread reaches the backend while this thread
+        # is still asserting on the ducker — and unittest.mock is not thread-safe,
+        # so two threads building child mocks livelock. It cost an afternoon once:
+        # the suite hung at whichever test happened to be running, nowhere near the
+        # cause. These tests are about the ducker, so the backend can be inert.
+        app.backend = SimpleNamespace(name="ducking-stub", transcribe=lambda audio: "")
         app._on_model_ready()
         return app.ducker
 
