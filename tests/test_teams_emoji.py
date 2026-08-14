@@ -65,41 +65,38 @@ class TestExtract:
 
 
 class TestStore:
-    def test_a_name_round_trips(self, tmp_path):
-        path = tmp_path / "emoji.json"
-        custom_emoji.remember("name", "jackl frown", FRAGMENT, path)
-        assert custom_emoji.load(path).names == {"jackl frown": FRAGMENT}
+    """Reading the store. Nothing writes it — see the module docstring for why — so
+    these build the file directly, which is also how a user populates it today."""
 
-    def test_a_character_round_trips_unnormalised(self, tmp_path):
-        """A codepoint must be kept exactly: normalising would strip it to nothing."""
-        path = tmp_path / "emoji.json"
-        custom_emoji.remember("character", EYES, STANDARD, path)
-        assert custom_emoji.load(path).characters == {EYES: STANDARD}
+    @staticmethod
+    def _write(path, payload):
+        import json
 
-    def test_the_two_sections_do_not_collide(self, tmp_path):
-        path = tmp_path / "emoji.json"
-        custom_emoji.remember("name", "frown", FRAGMENT, path)
-        custom_emoji.remember("character", EYES, STANDARD, path)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_reads_both_sections(self, tmp_path):
+        path = self._write(
+            tmp_path / "emoji.json",
+            {"names": {"jackl frown": FRAGMENT}, "characters": {EYES: STANDARD}},
+        )
         stored = custom_emoji.load(path)
-        assert stored.names == {"frown": FRAGMENT}
+        assert stored.names == {"jackl frown": FRAGMENT}
         assert stored.characters == {EYES: STANDARD}
 
     def test_names_are_normalised_so_they_can_be_spoken(self, tmp_path):
-        path = tmp_path / "emoji.json"
-        key = custom_emoji.remember("name", "Jackl_Frown!", FRAGMENT, path)
-        assert key == "jackl frown"
-        assert custom_emoji.load(path).names[key] == FRAGMENT
+        """A hand-written "Jackl_Frown!" still has to match what speech produces."""
+        path = self._write(tmp_path / "emoji.json", {"names": {"Jackl_Frown!": FRAGMENT}})
+        assert custom_emoji.load(path).names == {"jackl frown": FRAGMENT}
 
-    def test_a_second_capture_replaces_the_first(self, tmp_path):
-        path = tmp_path / "emoji.json"
-        custom_emoji.remember("name", "frown", "<old>", path)
-        custom_emoji.remember("name", "frown", FRAGMENT, path)
-        assert custom_emoji.load(path).names == {"frown": FRAGMENT}
+    def test_characters_are_not_normalised(self, tmp_path):
+        """Normalising a codepoint would strip it to nothing and lose the entry."""
+        path = self._write(tmp_path / "emoji.json", {"characters": {EYES: STANDARD}})
+        assert custom_emoji.load(path).characters == {EYES: STANDARD}
 
     def test_a_flat_file_is_read_as_names(self, tmp_path):
         """The shape this store had before standard emoji were worth keeping."""
-        path = tmp_path / "emoji.json"
-        path.write_text('{"frown": "<x>"}', encoding="utf-8")
+        path = self._write(tmp_path / "emoji.json", {"frown": "<x>"})
         stored = custom_emoji.load(path)
         assert stored.names == {"frown": "<x>"}
         assert stored.characters == {}
@@ -118,8 +115,9 @@ class TestStore:
         assert custom_emoji.load(path).names == {}
 
     def test_unusable_entries_are_skipped(self, tmp_path):
-        path = tmp_path / "emoji.json"
-        path.write_text('{"good": "<x>", "empty": "", "wrong": 42}', encoding="utf-8")
+        path = self._write(
+            tmp_path / "emoji.json", {"names": {"good": "<x>", "empty": "", "wrong": 42}}
+        )
         assert custom_emoji.load(path).names == {"good": "<x>"}
 
 

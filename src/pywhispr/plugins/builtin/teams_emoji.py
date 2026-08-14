@@ -13,13 +13,16 @@ lands on "crown" and "shipit" on "ship". Anything running after it would therefo
 almost never get a turn. :data:`ALTITUDE` is what makes the order explicit rather
 than a consequence of ``BUILTINS`` happening to list this module first.
 
-The store is read but never written. :func:`extract` is the working half — hand it
-the clipboard's HTML and it finds the fragment — and it deliberately has no caller,
+**The store is only ever read.** There is no writer at all: :func:`extract` is the
+working half — hand it the clipboard's HTML and it finds the fragment — and it
+deliberately has no caller,
 because every capture route was worse than the gap: ``act`` runs after the injector
 has already replaced the clipboard, ``rewrite`` must be reentrant and I/O-free and
 also runs on API request threads, a ``pywhispr`` subcommand would put Teams into the
 main program's command surface, and a tray entry needs plugins to declare menu
-actions generically. Hand-editing ``custom_emoji.json`` works meanwhile.
+actions generically. Hand-editing ``custom_emoji.json`` works meanwhile, and writing
+it is a few lines of :mod:`json` whenever a capture route is settled — there is no
+point shipping an uncalled writer in the meantime.
 """
 
 from __future__ import annotations
@@ -452,31 +455,6 @@ def _strings(section: object, key_of) -> dict[str, str]:
         for key, markup in section.items()
         if isinstance(key, str) and isinstance(markup, str) and markup and key_of(key)
     }
-
-
-def save(stored: Stored, path: Path | None = None) -> None:
-    path = path or store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"names": stored.names, "characters": stored.characters}
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def remember(kind: str, key: str, fragment: str, path: Path | None = None) -> str:
-    """Store `fragment`, returning the key it went under.
-
-    ``kind`` is what :func:`extract` reported: a name is normalised so it can be
-    spoken and matched, a character is kept exactly as it is.
-    """
-    stored = load(path)
-    names = dict(stored.names)
-    characters = dict(stored.characters)
-    if kind == "character":
-        characters[key] = fragment
-    else:
-        key = normalise(key)
-        names[key] = fragment
-    save(Stored(names=names, characters=characters), path)
-    return key
 
 
 # -- the plugin itself -------------------------------------------------------
