@@ -36,6 +36,7 @@ with a ``rewrite`` only acts when that rewrite claimed something; a plugin with 
 
 from __future__ import annotations
 
+import string
 from dataclasses import dataclass
 
 # How many words either side of the trigger a plugin is shown — and, because a
@@ -43,6 +44,22 @@ from dataclasses import dataclass
 # matches vocab.MAX_PHRASE_WORDS: past that, a spoken phrase is a sentence.
 LOOKBEHIND_WORDS = 4
 LOOKAHEAD_WORDS = 4
+
+# Punctuation the *model* invented, which a replacement should take with it rather
+# than leave stranded. Every transcript arrives with a full stop appended whether the
+# sentence wanted one or not, and with a comma wherever the model heard the pause
+# before a name — so "hello smile emoji" arrives as "Hello, smile emoji." and pasted
+# as-is reads "Hello, 🙂."
+#
+# Here rather than in one plugin because any plugin turning spoken words into a
+# symbol hits it, and because the full stop has a concrete cost: Teams and Slack only
+# render the large emoji when the message is nothing but emoji.
+#
+# "!" and "?" are deliberately absent — the model does not add those on its own, so
+# they are the speaker's and an emoji is allowed to end an exclamation.
+ABSORB_BEFORE = ","
+ABSORB_AFTER = ".…"
+_SPACES = " \t"
 
 
 @dataclass(frozen=True)
@@ -99,18 +116,58 @@ class Match:
     def trigger_text(self) -> str:
         return self.transcript[self.start : self.end]
 
-    def claim(self, start: int, end: int, text: str) -> Rewrite:
+    def claim(self, start: int, end: int, text: str, html: str | None = None) -> Rewrite:
         """Convenience for the usual shape: replace a span with a string."""
-        return Rewrite(start=start, end=end, text=text)
+        return Rewrite(start=start, end=end, text=text, html=html)
 
-    def claim_from(self, word: Word, text: str) -> Rewrite:
+    def claim_from(self, word: Word, text: str, html: str | None = None) -> Rewrite:
         """Replace everything from `word` up to the end of the trigger with `text`.
 
         The common case for a trailing-keyword plugin: "thumbs up emoji" becomes
         one character, and the space in front of "thumbs" is left alone because
         the claim starts where the word does.
         """
-        return Rewrite(start=word.start, end=self.end, text=text)
+        return Rewrite(start=word.start, end=self.end, text=text, html=html)
+
+    def claim_absorbing(self, word: Word, text: str, html: str | None = None) -> Rewrite:
+        """Like :meth:`claim_from`, but take the model's own punctuation along too.
+
+        Widens the claim over a comma immediately in front of `word` and over a
+        trailing full stop when the trigger ends the transcript — see
+        :data:`ABSORB_BEFORE` and :data:`ABSORB_AFTER` for why those two marks in
+        particular. A comma that separates clauses is left alone, because only the
+        mark at the very end of the transcript is the model's invention.
+
+        Absorbing ", " leaves the replacement hard against the previous word, so the
+        separator comes back as a single space — and it is put into **both** `text`
+        and `html`, because a rich span covers the whole replacement. Getting that
+        wrong once spliced an image over the space and glued it to the word before,
+        which is the kind of thing worth doing in one place.
+
+        Both ends stop at the window this match was given, so this can only ever
+        reach punctuation next to words the plugin was actually shown.
+        """
+        transcript = self.transcript
+        start = word.start
+        cursor = start
+        while cursor > self.window_start and transcript[cursor - 1] in _SPACES:
+            cursor -= 1
+        if cursor > self.window_start and transcript[cursor - 1] in ABSORB_BEFORE:
+            start = cursor - 1
+            while start > self.window_start and transcript[start - 1] in _SPACES:
+                start -= 1
+
+        end = self.end
+        if not transcript[end:].strip(ABSORB_AFTER + string.whitespace):
+            end = self.window_end
+
+        separator = " " if start > 0 and not transcript[start - 1].isspace() else ""
+        return Rewrite(
+            start=start,
+            end=end,
+            text=f"{separator}{text}",
+            html=None if html is None else f"{separator}{html}",
+        )
 
     def nothing_to_change(self) -> Rewrite:
         """Claim the match without altering any text.
@@ -127,14 +184,25 @@ class Rewrite:
 
     Half-open, like a slice: ``transcript[start:end]`` becomes ``text``. A
     zero-width span is legal and means "mine, but change nothing".
+
+    ``html`` is optional markup for things plain text cannot say — a Teams custom
+    emoji is an ``<img>`` referencing a tenant asset, not a character. It is a
+    *second rendering* of ``text``, never a substitute for it: the transcript stays
+    plain throughout the pipeline, so the join, the history and the network API are
+    unaffected, and the markup is used only when the paste target accepts HTML. So
+    ``text`` must still be something the user would be content to receive — the
+    emoji's name, say — because that is what they get anywhere HTML does not reach.
     """
 
     start: int
     end: int
     text: str
+    html: str | None = None
 
 
 __all__ = [
+    "ABSORB_AFTER",
+    "ABSORB_BEFORE",
     "LOOKAHEAD_WORDS",
     "LOOKBEHIND_WORDS",
     "Match",

@@ -154,7 +154,7 @@ def test_full_cycle(app, qtbot):
         assert app.state == State.TRANSCRIBING
         wait_for_worker(app, qtbot)
         assert app.state == State.INSERTING
-        insert.assert_called_once_with("hello world")
+        insert.assert_called_once_with("hello world", ())
 
     app.injector.finished.emit(True)
     assert app.state == State.IDLE
@@ -176,19 +176,19 @@ class TestContinuationJoin:
         app.cfg.join_continuations = True
         with patch.object(app._context, "preceding_text", return_value="I went to the shop"):
             insert = self._dictate(app, qtbot, "Then I came home.")
-        insert.assert_called_once_with(" then I came home.")
+        insert.assert_called_once_with(" then I came home.", ())
 
     def test_full_stop_keeps_the_capital(self, app, qtbot):
         app.cfg.join_continuations = True
         with patch.object(app._context, "preceding_text", return_value="I went to the shop."):
             insert = self._dictate(app, qtbot, "Then I came home.")
-        insert.assert_called_once_with(" Then I came home.")
+        insert.assert_called_once_with(" Then I came home.", ())
 
     def test_no_context_inserts_verbatim(self, app, qtbot):
         app.cfg.join_continuations = True
         with patch.object(app._context, "preceding_text", return_value=None):
             insert = self._dictate(app, qtbot, "Then I came home.")
-        insert.assert_called_once_with("Then I came home.")
+        insert.assert_called_once_with("Then I came home.", ())
 
     def test_a_broken_join_never_loses_the_transcript(self, app, qtbot):
         """The audio is gone by now, so a failure here must still paste the text
@@ -199,7 +199,7 @@ class TestContinuationJoin:
             app._context, "preceding_text", side_effect=RuntimeError("accessibility exploded")
         ):
             insert = self._dictate(app, qtbot, "Then I came home.")
-        insert.assert_called_once_with("Then I came home.")
+        insert.assert_called_once_with("Then I came home.", ())
         assert app.state == State.INSERTING
         app.injector.finished.emit(True)
         assert app.state == State.IDLE
@@ -211,7 +211,7 @@ class TestContinuationJoin:
             patch("pywhispr.app.join_text", return_value="something else entirely"),
         ):
             insert = self._dictate(app, qtbot, "Then I came home.")
-        insert.assert_called_once_with("Then I came home.")
+        insert.assert_called_once_with("Then I came home.", ())
 
     def test_pasted_text_is_remembered_but_clipboard_only_is_not(self, app):
         with patch.object(app._context, "remember") as remember:
@@ -245,13 +245,13 @@ class TestVocabulary:
     def test_corrects_the_transcript(self, app, qtbot):
         app._vocab = parse_vocabulary("BeyondTrust")
         insert = self._dictate(app, qtbot, "I work at beyond trust.")
-        insert.assert_called_once_with("I work at BeyondTrust.")
+        insert.assert_called_once_with("I work at BeyondTrust.", ())
 
     def test_disabled_by_config(self, app, qtbot):
         app._vocab = parse_vocabulary("BeyondTrust")
         app.cfg.vocabulary_enabled = False
         insert = self._dictate(app, qtbot, "I work at beyond trust.")
-        insert.assert_called_once_with("I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.", ())
 
     def test_correction_happens_before_the_join(self, app, qtbot):
         """The join decides about the first word, so it must see the fixed one."""
@@ -259,20 +259,20 @@ class TestVocabulary:
         app._vocab = parse_vocabulary("BeyondTrust")
         with patch.object(app._context, "preceding_text", return_value="I work at"):
             insert = self._dictate(app, qtbot, "Beyond trust, mostly.")
-        insert.assert_called_once_with(" BeyondTrust, mostly.")
+        insert.assert_called_once_with(" BeyondTrust, mostly.", ())
 
     def test_a_broken_vocabulary_never_loses_the_transcript(self, app, qtbot):
         app._vocab = parse_vocabulary("BeyondTrust")
         with patch("pywhispr.app.apply_vocabulary", side_effect=RuntimeError("boom")):
             insert = self._dictate(app, qtbot, "I work at beyond trust.")
-        insert.assert_called_once_with("I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.", ())
         assert app.state == State.INSERTING
 
     def test_output_that_ran_away_is_rejected(self, app, qtbot):
         app._vocab = parse_vocabulary("BeyondTrust")
         with patch("pywhispr.app.apply_vocabulary", return_value="x"):
             insert = self._dictate(app, qtbot, "I work at beyond trust.")
-        insert.assert_called_once_with("I work at beyond trust.")
+        insert.assert_called_once_with("I work at beyond trust.", ())
 
     def test_the_api_gets_corrections_too(self, app):
         app._vocab = parse_vocabulary("BeyondTrust")
@@ -290,7 +290,7 @@ class TestVocabulary:
             app._edit_vocabulary()
         assert path.read_text(encoding="utf-8") == "BeyondTrust\n"
         insert = self._dictate(app, qtbot, "I work at beyond trust.")
-        insert.assert_called_once_with("I work at BeyondTrust.")
+        insert.assert_called_once_with("I work at BeyondTrust.", ())
 
     def test_cancelling_changes_nothing(self, app, tmp_path):
         path = tmp_path / "vocabulary.txt"
@@ -330,23 +330,23 @@ class TestFillerRemoval:
 
     def test_removes_fillers(self, app, qtbot):
         insert = self._dictate(app, qtbot, "Um, so I, uh, think so.")
-        insert.assert_called_once_with("So I think so.")
+        insert.assert_called_once_with("So I think so.", ())
 
     def test_disabled_by_config(self, app, qtbot):
         app.cfg.remove_fillers = False
         insert = self._dictate(app, qtbot, "Um, so I, uh, think so.")
-        insert.assert_called_once_with("Um, so I, uh, think so.")
+        insert.assert_called_once_with("Um, so I, uh, think so.", ())
 
     def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
         with patch("pywhispr.app.remove_fillers", side_effect=RuntimeError("boom")):
             insert = self._dictate(app, qtbot, "Um, so I think so.")
-        insert.assert_called_once_with("Um, so I think so.")
+        insert.assert_called_once_with("Um, so I think so.", ())
         assert app.state == State.INSERTING
 
     def test_output_that_is_not_a_deletion_is_rejected(self, app, qtbot):
         with patch("pywhispr.app.remove_fillers", return_value="Something else entirely."):
             insert = self._dictate(app, qtbot, "Um, so I think so.")
-        insert.assert_called_once_with("Um, so I think so.")
+        insert.assert_called_once_with("Um, so I think so.", ())
 
     def test_the_api_gets_it_too(self, app):
         app._test_backend.transcribe.return_value = "Um, hello from over there."
@@ -387,14 +387,14 @@ class TestPlugins:
     def test_a_rewrite_reaches_the_injector(self, app, qtbot):
         app._plugins = [self._plugin(rewrite=self._shout)]
         insert = self._dictate(app, qtbot, "Here we go marker.")
-        insert.assert_called_once_with("Here we !.")
+        insert.assert_called_once_with("Here we !.", ())
 
     def test_runs_after_the_vocabulary(self, app, qtbot):
         """A trigger has to see the corrected spelling, or it cannot match it."""
         app._vocab = parse_vocabulary("marker")
         app._plugins = [self._plugin(rewrite=self._shout)]
         insert = self._dictate(app, qtbot, "Here we go MARKER.")
-        insert.assert_called_once_with("Here we !.")
+        insert.assert_called_once_with("Here we !.", ())
 
     def test_runs_before_the_join(self, app, qtbot):
         """The join decides about the opening word, so it must see the final one."""
@@ -405,13 +405,13 @@ class TestPlugins:
         with patch.object(app._context, "preceding_text", return_value="I went out"):
             insert = self._dictate(app, qtbot, "Marker then I came home.")
         # "Marker" became "and", and the join lower-cased *that* word.
-        insert.assert_called_once_with(" and then I came home.")
+        insert.assert_called_once_with(" and then I came home.", ())
 
     def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
         app._plugins = [self._plugin(rewrite=self._shout)]
         with patch("pywhispr.app.apply_plugins", side_effect=RuntimeError("boom")):
             insert = self._dictate(app, qtbot, "Here we go marker.")
-        insert.assert_called_once_with("Here we go marker.")
+        insert.assert_called_once_with("Here we go marker.", ())
 
     def test_an_action_waits_for_the_insertion(self, app, qtbot):
         """An action that types or switches window must not race the paste."""
@@ -447,7 +447,7 @@ class TestPlugins:
         app._plugins = [self._plugin(rewrite=self._shout, act=lambda match: None)]
         app._actions = None  # what cfg.plugin_actions_enabled = false builds
         insert = self._dictate(app, qtbot, "Here we go marker.")
-        insert.assert_called_once_with("Here we !.")
+        insert.assert_called_once_with("Here we !.", ())
         app.injector.finished.emit(True)
         assert app._pending_actions == ()
 
@@ -461,6 +461,45 @@ class TestPlugins:
         app._actions.dispatch.assert_called_once()
         assert app.state == State.IDLE
         assert list(app._history) == []  # nothing worth recalling
+
+    def test_rich_spans_reach_the_injector(self, app, qtbot):
+        def rewrite(match):
+            return match.claim_from(match.words_before[-1], "frown", html="<img alt='f'>")
+
+        app._plugins = [self._plugin(rewrite=rewrite)]
+        insert = self._dictate(app, qtbot, "Here we go marker.")
+        text, rich = insert.call_args.args
+        assert text == "Here we frown."
+        assert [text[s:e] for s, e, _ in rich] == ["frown"]
+
+    def test_rich_spans_shift_with_the_join(self, app, qtbot):
+        """join_text may prepend a space, which moves every span along by one."""
+
+        def rewrite(match):
+            return match.claim_from(match.words_before[-1], "frown", html="<img alt='f'>")
+
+        app.cfg.join_continuations = True
+        app._plugins = [self._plugin(rewrite=rewrite)]
+        with patch.object(app._context, "preceding_text", return_value="I said"):
+            insert = self._dictate(app, qtbot, "Here we go marker.")
+        text, rich = insert.call_args.args
+        assert text.startswith(" ")
+        assert [text[s:e] for s, e, _ in rich] == ["frown"]
+
+    def test_spans_are_dropped_if_the_text_moved_unexpectedly(self, app):
+        """Markup over the wrong characters is worse than none at all.
+
+        Tested directly rather than through a patched join, because _joined's own
+        tripwire catches a misbehaving join_text first and returns the raw text —
+        so this branch is belt-and-braces that the pipeline cannot actually reach.
+        Worth keeping, and worth testing at the level where it is reachable.
+        """
+        app._rich_spans = ((2, 5, "<b>x</b>"),)
+        assert app._shifted_rich("one two", "wholly different text") == ()
+
+    def test_spans_are_kept_when_only_a_space_was_added(self, app):
+        app._rich_spans = ((0, 3, "<b>x</b>"),)
+        assert app._shifted_rich("abc def", " abc def") == ((1, 4, "<b>x</b>"),)
 
     def test_a_failed_transcription_runs_nothing(self, app):
         app._pending_actions = ("pretend",)
@@ -482,6 +521,20 @@ class TestPlugins:
         # worker both build child mocks. The half of that constraint worth checking
         # is that the engine is reentrant, and test_plugins.py does it with no app,
         # no Qt and no mocks in the way.
+
+        def test_never_gets_rich_spans_either(self, app):
+            """Those are GUI-thread state for one dictation cycle.
+
+            A request thread setting them would leave markup queued against a
+            transcript that this machine's user never dictated.
+            """
+            def rewrite(match):
+                return match.claim(match.start, match.end, "X", html="<b>X</b>")
+
+            app._plugins = [TestPlugins._plugin(rewrite=rewrite)]
+            app._test_backend.transcribe.return_value = "Here we go marker."
+            app._api_transcribe(np.zeros(16000, dtype=np.float32))
+            assert app._rich_spans == ()
 
         def test_never_gets_the_actions(self, app):
             """Otherwise anything that can reach the port can run local code."""
@@ -1087,6 +1140,9 @@ class TestHistoryRecall:
             # The focus goes back to where it was *before* the paste keystroke.
             restore.assert_called_once_with(1234)
             qtbot.waitUntil(lambda: insert.called, timeout=1000)
+            # No rich spans, and correctly so: the history keeps plain text, because
+            # a remembered transcript is re-pasted somewhere else entirely. Anything
+            # that was markup comes back as the words it degrades to.
             insert.assert_called_once_with("the lost sentence")
         app.injector.finished.emit(True)
         assert app.state == State.IDLE
@@ -1197,21 +1253,21 @@ class TestVoiceReset:
         app._on_model_ready()
         with patch.object(app.injector, "insert") as insert:
             app._on_transcribed("Book the room. Clear clear, book the hall.")
-        insert.assert_called_once_with("Book the hall.")
+        insert.assert_called_once_with("Book the hall.", ())
         assert list(app._history) == ["Book the hall."]  # not the discarded half
 
     def test_the_words_used_as_words_are_left_alone(self, app):
         app._on_model_ready()
         with patch.object(app.injector, "insert") as insert:
             app._on_transcribed("Please clear that surface.")
-        insert.assert_called_once_with("Please clear that surface.")
+        insert.assert_called_once_with("Please clear that surface.", ())
 
     def test_no_phrases_configured_inserts_verbatim(self, app):
         app._on_model_ready()
         app._reset_phrases = compile_reset_phrases([])
         with patch.object(app.injector, "insert") as insert:
             app._on_transcribed("Book the room. Clear clear. Book the hall.")
-        insert.assert_called_once_with("Book the room. Clear clear. Book the hall.")
+        insert.assert_called_once_with("Book the room. Clear clear. Book the hall.", ())
 
 
 class TestSettingsVisit:

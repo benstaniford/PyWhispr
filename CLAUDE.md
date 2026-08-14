@@ -236,6 +236,97 @@ about spelling, unlike joining, which needs a caret.
   the *developer's real* vocabulary file. The `app` fixture patches it (and
   `create_hotkey_listener`, which was quietly claiming a real global hotkey).
 
+## Rich paste (`richclip.py` + `custom_emoji.py`)
+
+Some things cannot be said in plain text. A Teams custom emoji has no codepoint —
+it is a tenant-hosted image behind an `<img itemid=...>` inside a marker element —
+so the only way to hand one to another app is HTML on the clipboard.
+
+- **`QMimeData.setHtml()` is unusable on Windows, and the failure is silent.** It
+  writes a `CF_HTML` whose header is valid but whose *document* is not: `StartHTML`
+  points straight at `<!--StartFragment-->` with no `<html>`/`<body>` root. WebView2
+  apps like Teams ignore the whole payload and take the plain-text alternative, which
+  looks exactly like "Teams refuses pasted HTML" and is not. Wrap the same fragment
+  in a real document and it renders — custom emoji, bold, links, all of it. Hence
+  the hand-built header in `richclip.build_cf_html`, and hence `injector._set_rich`
+  deliberately not using Qt. **Diagnosing this needs the raw bytes**: enumerate the
+  clipboard with `EnumClipboardFormats` and read `"HTML Format"` back, because every
+  higher-level view of it looked correct.
+- **The transcript stays plain text end to end.** `Rewrite.html` is a *second
+  rendering* carried alongside, and `PluginResult.rich` reports where each one landed
+  in **output** coordinates. So `join`, `history` and `_api_transcribe` are untouched
+  and keep their invariants — the alternative, letting markup into the transcript,
+  would have made `_joined`'s "text untouched" check meaningless.
+- `Rewrite.text` must therefore still be something the user would accept: the emoji's
+  *name*. That is what arrives wherever HTML does not reach, which is the same way
+  Teams' own copy degrades, and it is why a failure here costs formatting rather
+  than words.
+- **The separator goes in both renderings.** A rich span covers the whole
+  replacement, so markup that omits the leading space is spliced over it and the
+  image arrives glued to the previous word.
+- `app._shifted_rich` moves spans by whatever the join prepended (0 or 1). Its
+  "text moved unexpectedly" branch is unreachable via `_joined`, whose own tripwire
+  fires first — belt-and-braces, and tested directly rather than through the pipeline.
+- **Rich spans are GUI-thread state for one dictation cycle**, set only when
+  `collect_actions` is true. A network request runs the same pass on its own thread
+  and must not touch them; there is a test for exactly that.
+- Custom emoji markup can only be **captured**, never derived — there is no
+  documented API for listing a tenant's emoji — and **nothing captures it yet**.
+  `teams_emoji.extract()` works and is tested; it simply has no caller. Every route
+  was rejected for a reason worth keeping: `act` runs after the injector has already
+  overwritten the clipboard; `rewrite` must be reentrant and I/O-free and also runs
+  on API request threads; a `pywhispr` subcommand puts Teams into the main program's
+  command surface, which is what the framework exists to prevent; and a tray entry
+  needs plugins to declare menu actions generically, which nobody has asked for.
+  So the store is read-only in practice — hand-editing `custom_emoji.json` works.
+- The store is JSON rather than a `vocabulary.txt`-style line format because the
+  fragments are hundreds of characters of markup; a hand-editable one-per-line file
+  would be a fiction, though deleting an entry still works.
+- **Nothing in the main program knows what an emoji is.** An earlier version put the
+  store in `pywhispr/` and gave `cli.py` a `learn-emoji` subcommand — 19 emoji
+  references in the main CLI — which contradicted this file's own claim that the
+  framework knows nothing about emoji. `richclip.py` is the exception that proves the
+  rule: it stays in the main package because its code is generic (text + spans →
+  HTML) and `injector.py` is its real consumer.
+- **`emoji` and `teams_emoji` are two plugins, not one importing the other.** They
+  cooperate through the mechanism the framework already had: **returning `None`
+  declines, and the words go to the next plugin that matched them.** `teams_emoji` is
+  asked first, answers for captured names, and stays silent otherwise.
+  - **Being asked first is load-bearing.** `emoji`'s fuzzy tier answers almost
+    anything — "frown" → "crown", "shipit" → "ship" — so a plugin running after it
+    would essentially never get a turn. This was built as a multi-pass engine first,
+    with `teams_emoji` at a higher altitude, and it did not work for exactly that
+    reason.
+  - `Plugin.altitude` is therefore a **priority, not a pipeline stage**: it breaks
+    the tie at a shared position in `_candidates`, and nothing runs in sequence. The
+    multi-pass version was reverted — ~60 lines of driver plus rich-span remapping,
+    buying a capability nothing used. If a plugin ever genuinely needs to consume
+    another's *output* (upgrading a Unicode emoji to Teams' own HTML, say, using the
+    `itemscope` attribute), that is when to reconsider, and not before.
+  - Altitude still earns its place for one concrete reason: load order alone always
+    put built-ins first, so a **user's** plugin could never outrank `emoji`.
+- **`decorate(text) -> [(start, end, html)]` is the third phase**, and the reason the
+  multi-pass idea was not needed. Wanting Teams' own markup for a standard emoji looks
+  like "rewrite the character", but it is not a text change at all: the codepoint is
+  exactly what should still arrive in Slack, an email or Notepad. Only the *markup*
+  differs. So the phase runs after all rewriting, is handed the finished text, and
+  returns spans — it **cannot change a character**, which is what makes it safe where a
+  second rewriting pass was not: nothing to remap, no invariant to erode, still one
+  pass. A malformed or overlapping span is refused, so a decorator cannot fight a
+  rewrite or another decorator.
+- **`Match.claim_absorbing`** lives in `plugins/api.py` rather than in `emoji.py`,
+  because any plugin turning spoken words into a symbol needs it and because it is
+  the single place that knows the separator must go into *both* the text and the
+  markup — getting that wrong spliced an image over the space and glued it to the
+  previous word.
+- The stored fragments are **tenant-scoped** (image URLs fetched with the viewer's
+  credentials), so the store is not shareable configuration.
+- macOS `NSPasteboard` path is written from the documented API and **unverified on a
+  real machine**; every failure returns False and falls back to plain text.
+- Testing gotcha: app tests never read the developer's real emoji store only because
+  `isolated_app` patches `load_plugins` to `[]`, so the plugin modules are never
+  imported. A test that loads the real `BUILTINS` *will* read it.
+
 ## Plugins (`plugins/` + `plugins/builtin/emoji.py`)
 
 The other passes each do one fixed job; this is the open-ended one — a phrase the
@@ -329,6 +420,18 @@ opening word that join then decides about.
     without the function-word check answers "the" with 🌳 (two edits from "tree").
   - The alias table is checked **before the length guard** too: "ok" is two characters
     and was silently dead in the table until that ordering.
+- **Teams' `NATIVE_IDS` table is hand-maintained, and every entry needs two checks.**
+  Nothing about it is derivable: the thumbs up is `yes`, tears-of-joy is `cwl`, newer ones
+  look like `1f47f_angryfacewithhorns`. Guessing from `unicodedata` reproduced 59 of 83
+  known ids and missed every common one. The ids came out of Teams' own maps in its cached
+  web bundles, and **both** checks matter: (1) the id must resolve on the CDN, because
+  `face` and `feed` are valid hex so `face_enrollment` and `feed_loaded` look like ids and
+  are not — and an id Teams does not recognise makes it **refuse the entire paste,
+  silently**; (2) the asset must actually draw that emoji, because a bare id is a
+  *reaction* keyed by meaning, so `like` is a face holding a thumb and `laughdog` is a dog
+  for a *face* codepoint. No rule separates them, so the exclusions are empirical and
+  ~90 reaction ids ship uninspected. There is deliberately **no regenerate script**: it
+  would scrape a private cache Microsoft can change, and would still need human eyes.
 - **21 aliases exist purely because the legacy names are unreachable by ear**: 🔫 is
   `PISTOL`, 🍔 is `HAMBURGER`, ⛳ is `FLAG IN HOLE`. Verify a codepoint's real
   `unicodedata.name` before adding one — `U+1FA9B` is `SCREWDRIVER`, not a drill,

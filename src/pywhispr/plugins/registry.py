@@ -44,7 +44,7 @@ from pywhispr.plugins.engine import Plugin, compile_patterns
 log = logging.getLogger(__name__)
 
 # Shipped plugins, in load order. Named statically so the packaged builds see them.
-BUILTINS: tuple[str, ...] = ("emoji",)
+BUILTINS: tuple[str, ...] = ("emoji", "teams_emoji")
 
 MODULE_PREFIX = "pywhispr_plugin_"
 
@@ -77,9 +77,13 @@ def _plugin_from_module(module, name: str, source: str) -> Plugin | None:
 
     rewrite = getattr(module, "rewrite", None)
     act = getattr(module, "act", None)
-    if rewrite is None and act is None:
-        log.warning("Plugin %r implements neither rewrite nor act; ignoring it", name)
+    decorate = getattr(module, "decorate", None)
+    if rewrite is None and act is None and decorate is None:
+        log.warning("Plugin %r implements none of rewrite/act/decorate; ignoring it", name)
         return None
+    if decorate is not None and not callable(decorate):
+        log.warning("Plugin %r has a decorate that is not callable; ignoring it", name)
+        decorate = None
     if rewrite is not None and not callable(rewrite):
         log.warning("Plugin %r has a rewrite that is not callable; ignoring it", name)
         return None
@@ -92,12 +96,19 @@ def _plugin_from_module(module, name: str, source: str) -> Plugin | None:
         log.warning("Plugin %r has no usable trigger; ignoring it", name)
         return None
 
+    altitude = getattr(module, "ALTITUDE", 0)
+    if not isinstance(altitude, int) or isinstance(altitude, bool):
+        log.warning("Plugin %r has a non-integer ALTITUDE; treating it as 0", name)
+        altitude = 0
+
     return Plugin(
         name=getattr(module, "NAME", name) or name,
         triggers=triggers,
         rewrite=rewrite,
         act=act,
+        decorate=decorate,
         source=source,
+        altitude=altitude,
         patterns=patterns,
     )
 
@@ -144,8 +155,10 @@ def _is_enabled(cfg: Config, name: str) -> bool:
 def load_plugins(cfg: Config) -> list[Plugin]:
     """Every enabled plugin, built-ins first. Never raises.
 
-    Built-ins first so their claims win a tie at the same position, and so a user
-    plugin loaded later is never shadowed by one we add in a future release.
+    Load order is only the *last* tie-break: two plugins wanting the same words are
+    ordered by ``ALTITUDE`` first, so this list's order decides nothing that a plugin
+    has an opinion about. That matters because it means a user plugin can outrank a
+    built-in, which load order alone never allowed.
     """
     if not cfg.plugins_enabled:
         log.info("Plugins are switched off")
@@ -184,7 +197,7 @@ def load_plugins(cfg: Config) -> list[Plugin]:
         log.info(
             "Loaded %d plugin(s): %s",
             len(plugins),
-            ", ".join(f"{p.name} ({p.source})" for p in plugins),
+            ", ".join(f"{p.name} ({p.source}, altitude {p.altitude})" for p in plugins),
         )
     return plugins
 
@@ -203,6 +216,18 @@ TRIGGERS list and either or both of two functions:
 
     rewrite(match) -> Rewrite | None    change the text
     act(match) -> None                  do something
+    decorate(text) -> [(start, end, html)]   add formatting, changing no text
+
+Every plugin sees the same transcript -- there is no pipeline. Where two of them
+match the same words, the one with the lower optional ALTITUDE = <int> is asked
+first, and if it returns None the next one is asked instead. That is how plugins
+cooperate: declining passes the words on. Everything defaults to 0, which is
+usually right; set it lower only to be asked ahead of something else.
+
+decorate() is handed the finished transcript and returns markup spans over it. Use
+it when your application has a richer way of showing something than plain text does
+-- the text is still what arrives everywhere else, so nothing is lost by it. It
+cannot change a character, which is what makes it the safe way to do this.
 
 rewrite() must be quick and must not do I/O: a dictation is waiting on it before
 it can paste. It also runs on more than one thread — the user interface thread for

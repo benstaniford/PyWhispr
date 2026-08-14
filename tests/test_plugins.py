@@ -180,6 +180,59 @@ class TestOverlap:
         assert apply_plugins("one marker and two marker", [plugin]).text == "X and X"
 
 
+class TestAltitude:
+    """Who is asked first when two plugins want the same words.
+
+    Not a pipeline: both see the same original transcript, and a plugin that returns
+    None hands the words to the next. Altitude only decides the order they are asked
+    in — which is enough for a fallback chain, and is why the multi-pass version of
+    this was reverted.
+    """
+
+    @staticmethod
+    def _at(altitude, replacement, phrase="marker"):
+        triggers = (Trigger(phrase=phrase),)
+        return Plugin(
+            name=f"a{altitude}",
+            triggers=triggers,
+            rewrite=lambda match: match.claim(match.start, match.end, replacement),
+            altitude=altitude,
+            patterns=compile_patterns(triggers),
+        )
+
+    def test_the_lower_altitude_is_asked_first(self):
+        low, high = self._at(-10, "LOW"), self._at(0, "HIGH")
+        for order in ([low, high], [high, low]):
+            assert apply_plugins("a marker", order).text == "a LOW"
+
+    def test_altitude_beats_load_order(self):
+        """So behaviour cannot hinge on the order of the BUILTINS tuple."""
+        first, second = self._at(5, "FIRST"), self._at(-5, "SECOND")
+        assert apply_plugins("a marker", [first, second]).text == "a SECOND"
+
+    def test_declining_passes_the_words_on(self):
+        """The whole fallback mechanism: None from the first, so the second answers."""
+        triggers = (Trigger(phrase="marker"),)
+        abstainer = Plugin(
+            name="abstainer",
+            triggers=triggers,
+            rewrite=lambda match: None,
+            altitude=-10,
+            patterns=compile_patterns(triggers),
+        )
+        assert apply_plugins("a marker", [abstainer, self._at(0, "TOOK IT")]).text == "a TOOK IT"
+
+    def test_equal_altitudes_fall_back_to_load_order(self):
+        first, second = self._at(0, "FIRST"), self._at(0, "SECOND")
+        assert apply_plugins("a marker", [first, second]).text == "a FIRST"
+
+    def test_position_still_dominates_altitude(self):
+        """A leftmost claim wins even from a higher altitude: altitude is a tie-break."""
+        left = self._at(99, "LEFT", phrase="alpha")
+        right = self._at(-99, "RIGHT", phrase="marker")
+        assert apply_plugins("alpha marker", [left, right]).text == "LEFT RIGHT"
+
+
 class TestContext:
     def test_words_before_are_in_reading_order_nearest_last(self):
         seen = {}
@@ -285,6 +338,147 @@ class TestActionRunner:
         plugin = make_plugin(act=lambda match: None)
         runner.stop()
         assert runner.dispatch([PendingAction(plugin, Match("marker", 0, 6))]) == 0
+
+
+class TestRichSpans:
+    """Markup travels beside the plain text, never inside it.
+
+    A Teams custom emoji has no codepoint, so it cannot be expressed as text at
+    all. The transcript therefore stays plain — the join, the history and the
+    network API are unaffected — and the markup is a second rendering used only
+    where the paste target accepts HTML.
+    """
+
+    @staticmethod
+    def _marked(replacement="NAME", markup="<img alt='NAME'>"):
+        def rewrite(match: Match) -> Rewrite | None:
+            if not match.words_before:
+                return None
+            return match.claim_from(match.words_before[-1], replacement, html=markup)
+
+        return make_plugin(rewrite=rewrite)
+
+    def test_the_span_lands_on_the_replacement(self):
+        result = apply_plugins("say the marker now", [self._marked()])
+        assert result.text == "say NAME now"  # claim_from eats "the marker"
+        (start, end, markup) = result.rich[0]
+        assert result.text[start:end] == "NAME"
+        assert markup == "<img alt='NAME'>"
+
+    def test_several_spans_all_map_correctly(self):
+        result = apply_plugins("a x marker and b y marker", [self._marked()])
+        assert [result.text[s:e] for s, e, _ in result.rich] == ["NAME", "NAME"]
+
+    def test_a_plugin_without_markup_produces_no_spans(self):
+        assert apply_plugins("a marker", [make_plugin(rewrite=claim_all("X"))]).rich == ()
+
+    def test_markup_that_is_not_a_string_is_refused_whole(self):
+        """And the text is left alone too: a half-applied claim is worse than none."""
+
+        def rewrite(match):
+            return Rewrite(match.start, match.end, "X", html=object())
+
+        result = apply_plugins("a marker", [make_plugin(rewrite=rewrite)])
+        assert result.text == "a marker"
+        assert result.rich == ()
+
+    def test_oversized_markup_is_refused(self):
+        big = "<i>" + "y" * MAX_REPLACEMENT_CHARS + "</i>"
+        result = apply_plugins("a marker", [self._marked(markup=big)])
+        assert result.text == "a marker"
+        assert result.rich == ()
+
+    def test_the_plain_text_is_still_usable_on_its_own(self):
+        """Whatever HTML would have shown, the text has to read sensibly."""
+        result = apply_plugins("nice work marker", [self._marked(replacement="frown")])
+        assert result.text == "nice frown"
+
+
+class TestDecorate:
+    """The third phase: markup over the finished text, changing no characters.
+
+    Exists because "show this emoji the way my application prefers" was never a text
+    change — the codepoint is exactly what should still arrive everywhere else. A
+    decorator cannot touch the text, so unlike a second rewriting pass there is
+    nothing to remap and no invariant to erode.
+    """
+
+    @staticmethod
+    def _decorator(target="X", markup="<b>X</b>", name="deco"):
+        triggers = (Trigger(phrase="unused-trigger"),)
+
+        def decorate(text):
+            start = text.find(target)
+            return [] if start < 0 else [(start, start + len(target), markup)]
+
+        return Plugin(
+            name=name,
+            triggers=triggers,
+            decorate=decorate,
+            patterns=compile_patterns(triggers),
+        )
+
+    def test_decorates_without_changing_the_text(self):
+        result = apply_plugins("keep X exactly", [self._decorator()])
+        assert result.text == "keep X exactly"
+        assert result.rich == ((5, 6, "<b>X</b>"),)
+
+    def test_decorates_what_a_rewrite_produced(self):
+        """The case this phase was built for: annotate a plugin's output."""
+        rewriter = make_plugin(rewrite=lambda m: m.claim(m.start, m.end, "X"))
+        result = apply_plugins("say marker", [rewriter, self._decorator()])
+        assert result.text == "say X"
+        assert result.rich == ((4, 5, "<b>X</b>"),)
+
+    def test_a_decoration_cannot_overlap_a_rewrite_span(self):
+        """A rewrite that already carried markup keeps it; the decorator loses."""
+        def rewrite(match):
+            return match.claim(match.start, match.end, "X", html="<i>mine</i>")
+
+        rewriter = make_plugin(rewrite=rewrite)
+        result = apply_plugins("say marker", [rewriter, self._decorator()])
+        assert result.rich == ((4, 5, "<i>mine</i>"),)
+
+    def test_two_decorators_do_not_fight(self):
+        first = self._decorator("A", "<b>A</b>", name="first")
+        second = self._decorator("A", "<i>A</i>", name="second")
+        result = apply_plugins("an A here", [first, second])
+        assert result.rich == ((3, 4, "<b>A</b>"),)
+
+    def test_a_raising_decorator_costs_only_itself(self):
+        def explode(text):
+            raise RuntimeError("no")
+
+        triggers = (Trigger(phrase="x"),)
+        bad = Plugin(name="bad", triggers=triggers, decorate=explode,
+                     patterns=compile_patterns(triggers))
+        result = apply_plugins("an A here", [bad, self._decorator("A")])
+        assert result.rich == ((3, 4, "<b>X</b>"),)  # the good one still applied
+
+    @pytest.mark.parametrize(
+        "offered",
+        [
+            [(0, 999, "<b>x</b>")],  # past the end
+            [(-1, 2, "<b>x</b>")],  # before the start
+            [(3, 3, "<b>x</b>")],  # empty
+            [(2, 1, "<b>x</b>")],  # backwards
+            [("a", 2, "<b>x</b>")],  # not integers
+            [(0, 2, 42)],  # markup is not a string
+            ["not even a tuple"],
+        ],
+    )
+    def test_malformed_decorations_are_refused(self, offered):
+        triggers = (Trigger(phrase="x"),)
+        plugin = Plugin(name="bad", triggers=triggers, decorate=lambda text: offered,
+                        patterns=compile_patterns(triggers))
+        result = apply_plugins("hello world", [plugin])
+        assert result.text == "hello world"
+        assert result.rich == ()
+
+    def test_a_plugin_may_implement_only_decorate(self):
+        """No rewrite, no act — the registry must still accept it."""
+        assert self._decorator().rewrite is None
+        assert apply_plugins("an X", [self._decorator()]).rich != ()
 
 
 class TestReentrancy:

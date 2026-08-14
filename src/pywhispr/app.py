@@ -121,6 +121,9 @@ class PyWhisprApp(QObject):
         )
         # Filled by the plugin pass, drained once the text has been inserted.
         self._pending_actions: tuple[PendingAction, ...] = ()
+        # (start, end, html) spans over the text about to be pasted, for content
+        # plain text cannot carry — see injector.insert and richclip.
+        self._rich_spans: tuple[tuple[int, int, str], ...] = ()
         self._fillers = filler_words(cfg.extra_filler_words, cfg.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(cfg.voice_reset_phrases)
         self.injector = TextInjector(cfg.paste_delay_ms, cfg.clipboard_restore_delay_ms)
@@ -844,7 +847,7 @@ class PyWhisprApp(QObject):
         # that went to the wrong window is exactly what the history is for.
         self._history.remember(corrected)
         self._last_inserted = self._joined(corrected)
-        self.injector.insert(self._last_inserted)
+        self.injector.insert(self._last_inserted, self._shifted_rich(corrected, self._last_inserted))
 
     def _after_reset(self, text: str) -> str:
         """Honour a spoken "scratch that", degrading to the raw transcript.
@@ -939,8 +942,33 @@ class PyWhisprApp(QObject):
             log.exception("Plugin pass failed; using the transcript as it was")
             return text
         if collect_actions:
+            # Both of these are GUI-thread state consumed by this dictation cycle,
+            # so they are set together and only for a local dictation. A network
+            # request runs this on its own thread and must not touch either.
             self._pending_actions = result.actions
+            self._rich_spans = result.rich
         return result.text
+
+    def _shifted_rich(
+        self, before: str, after: str
+    ) -> tuple[tuple[int, int, str], ...]:
+        """Move the rich spans along by whatever the join prepended.
+
+        ``join_text`` returns exactly ``("" | " ") + text`` with at most the first
+        letter re-cased, and ``_joined`` has already verified that — so the shift is
+        a length difference of 0 or 1 and nothing inside the text has moved
+        relative to anything else. Any other difference means something unexpected
+        happened, and the spans are dropped rather than guessed at: a plain-text
+        paste is a fine outcome, markup landing over the wrong characters is not.
+        """
+        spans = self._rich_spans
+        if not spans:
+            return ()
+        shift = len(after) - len(before)
+        if shift not in (0, 1) or not after.endswith(before[1:]):
+            log.debug("Dropping %d rich span(s): the text moved unexpectedly", len(spans))
+            return ()
+        return tuple((start + shift, end + shift, html) for start, end, html in spans)
 
     def _run_pending_actions(self) -> None:
         """Hand the queued plugin actions to their own thread, the text now placed.
@@ -1012,6 +1040,7 @@ class PyWhisprApp(QObject):
 
     def _finish_cycle(self) -> None:
         self._last_inserted = None
+        self._rich_spans = ()
         self._pending_actions = ()  # a cycle that ended another way runs nothing
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)

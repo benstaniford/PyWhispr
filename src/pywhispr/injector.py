@@ -17,6 +17,7 @@ import sys
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from pywhispr import richclip
 from pywhispr.platform_setup import check_macos_accessibility
 
 log = logging.getLogger(__name__)
@@ -39,8 +40,16 @@ class TextInjector(QObject):
         self._restore_delay_ms = restore_delay_ms
         self._old_text: str | None = None
 
-    def insert(self, text: str) -> None:
-        """Paste ``text`` into whatever app has keyboard focus. Main thread only."""
+    def insert(self, text: str, rich: tuple[tuple[int, int, str], ...] = ()) -> None:
+        """Paste ``text`` into whatever app has keyboard focus. Main thread only.
+
+        ``rich`` is ``(start, end, html)`` spans over ``text`` for content plain text
+        cannot express — a Teams custom emoji is a tenant-hosted image, not a
+        character. When present, the clipboard carries **both** an HTML rendering and
+        the plain text, and the target application picks. Anything that does not read
+        HTML, or any platform where we cannot write it, gets the words: the emoji
+        arrives as its name, which is exactly how Teams' own copy degrades.
+        """
         clipboard = self._clipboard()
 
         if not self.can_auto_paste():
@@ -56,12 +65,31 @@ class TextInjector(QObject):
         # worth the complexity, so those are left overwritten.
         self._old_text = clipboard.text() if mime is not None and mime.hasText() else None
 
-        clipboard.setText(text)
+        if not self._set_rich(text, rich):
+            clipboard.setText(text)
         # Delay lets the clipboard settle before pasting (Windows especially).
         QTimer.singleShot(self._paste_delay_ms, self._paste)
 
     def can_auto_paste(self) -> bool:
         return check_macos_accessibility()
+
+    @staticmethod
+    def _set_rich(text: str, rich: tuple[tuple[int, int, str], ...]) -> bool:
+        """Offer an HTML rendering as well as the text. False means text only.
+
+        Deliberately not via ``QMimeData.setHtml``: on Windows that writes a
+        ``CF_HTML`` with no ``<html>``/``<body>`` root, which WebView2 applications
+        like Teams reject outright, silently taking the plain text instead. See
+        richclip for the whole story.
+        """
+        if not rich:
+            return False
+        try:
+            return richclip.set_rich(richclip.render(text, list(rich)), text)
+        except Exception:
+            # A formatted paste is a luxury; the transcript is not.
+            log.exception("Rich paste failed; falling back to plain text")
+            return False
 
     def _clipboard(self):
         from PySide6.QtWidgets import QApplication
