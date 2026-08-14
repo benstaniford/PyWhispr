@@ -24,6 +24,7 @@ from __future__ import annotations
 import html as html_module
 import logging
 import sys
+import time
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,15 @@ _CF_UNICODETEXT = 13
 # real, reproducible, and invisible to any test that does not read the raw bytes
 # back off the clipboard.
 _GMEM_MOVEABLE_ZEROED = 0x0002 | 0x0040
+
+# ``OpenClipboard`` is a single-holder lock and losing it is ordinary: another
+# application is mid-copy, a clipboard manager is inspecting it, or endpoint
+# security has hooked the legacy API. Observed failing with ERROR_ACCESS_DENIED on
+# a managed machine while Qt's OLE path still worked, so this is not hypothetical.
+# A few quick attempts cost nothing and turn a silently downgraded paste into a
+# working one.
+_OPEN_ATTEMPTS = 5
+_OPEN_RETRY_SECONDS = 0.02
 
 # Wrapping the fragment in a document is the whole point of this module — see the
 # note above about what WebView2 does with a rootless one.
@@ -113,6 +123,16 @@ def render(text: str, spans: list[tuple[int, int, str]]) -> str:
 # -- Windows -----------------------------------------------------------------
 
 
+def _open_clipboard(user32) -> bool:
+    """Take the clipboard lock, retrying briefly. False if it stays unavailable."""
+    for attempt in range(_OPEN_ATTEMPTS):
+        if user32.OpenClipboard(None):
+            return True
+        if attempt + 1 < _OPEN_ATTEMPTS:
+            time.sleep(_OPEN_RETRY_SECONDS)
+    return False
+
+
 def _set_windows(fragment: str, text: str) -> bool:
     import ctypes
     from ctypes import wintypes
@@ -145,8 +165,8 @@ def _set_windows(fragment: str, text: str) -> bool:
     html_format = user32.RegisterClipboardFormatW(_CF_HTML_NAME)
     if not html_format:
         return False
-    if not user32.OpenClipboard(None):
-        log.debug("Could not open the clipboard for a rich paste")
+    if not _open_clipboard(user32):
+        log.debug("Could not open the clipboard for a rich paste; pasting plain text")
         return False
     try:
         user32.EmptyClipboard()
@@ -182,7 +202,7 @@ def _get_windows_html() -> str | None:
     user32.GetClipboardData.restype = wintypes.HANDLE
 
     html_format = user32.RegisterClipboardFormatW(_CF_HTML_NAME)
-    if not html_format or not user32.OpenClipboard(None):
+    if not html_format or not _open_clipboard(user32):
         return None
     try:
         handle = user32.GetClipboardData(html_format)

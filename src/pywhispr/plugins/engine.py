@@ -73,7 +73,15 @@ class Plugin:
     triggers: tuple[Trigger, ...]
     rewrite: Callable[[Match], Rewrite | None] | None = None
     act: Callable[[Match], None] | None = None
+    # Given the finished text, returns (start, end, html) spans and *nothing else*.
+    # Runs after all rewriting, cannot change a character, and is therefore incapable
+    # of the failure modes a second rewriting pass would have had.
+    decorate: Callable[[str], list[tuple[int, int, str]]] | None = None
     source: str = "builtin"
+    # Who gets first refusal on words two plugins both want: lowest altitude asked
+    # first. Not a pipeline stage — every plugin sees the same original transcript,
+    # and a plugin that declines by returning None passes the words to the next.
+    altitude: int = 0
     patterns: tuple[re.Pattern[str], ...] = field(default=(), compare=False)
 
 
@@ -181,13 +189,16 @@ def _context(text: str, start: int, end: int) -> Match:
     )
 
 
-def _candidates(text: str, plugins: list[Plugin]) -> list[tuple[int, int, Plugin, Match]]:
+def _candidates(
+    text: str, plugins: list[Plugin]
+) -> list[tuple[int, int, int, Plugin, Match]]:
     """Every trigger firing anywhere in `text`, in the order they will be offered.
 
-    Sorted by position, then by load order, so two plugins claiming the same words
-    resolve the same way every time — the earlier-loaded one wins. Built-ins load
-    first, so a user's own plugin cannot be silently shadowed by one of ours
-    appearing later.
+    Sorted by position, then by altitude, then by load order, so two plugins wanting
+    the same words resolve the same way every time. Position dominates because the
+    leftmost claim wins overall; altitude is the tie-break at a shared position, and
+    it exists so a *user's* plugin can outrank a built-in — load order alone always
+    put ours first, since BUILTINS is loaded before the folder is scanned.
     """
     found: list[tuple[int, int, Plugin, Match]] = []
     seen: set[tuple[int, int, int]] = set()
@@ -200,8 +211,8 @@ def _candidates(text: str, plugins: list[Plugin]) -> list[tuple[int, int, Plugin
                 if (order, start, end) in seen:
                     continue  # two of this plugin's own triggers on the same words
                 seen.add((order, start, end))
-                found.append((start, order, plugin, _context(text, start, end)))
-    found.sort(key=lambda item: (item[0], item[1]))
+                found.append((start, plugin.altitude, order, plugin, _context(text, start, end)))
+    found.sort(key=lambda item: (item[0], item[1], item[2]))
     return found
 
 
@@ -288,8 +299,77 @@ def _rewrite_of(plugin: Plugin, match: Match) -> Rewrite | None:
     return _validated(claim, match, plugin)
 
 
+def _decorations(
+    text: str,
+    plugins: list[Plugin],
+    existing: list[tuple[int, int, str]],
+) -> tuple[tuple[int, int, str], ...]:
+    """Ask every plugin to annotate the finished text, without changing it.
+
+    The third phase, and the tame one. A decorator is handed the final text and hands
+    back markup spans; it cannot touch a character, so there is nothing to remap and
+    no invariant to erode. That is the whole reason it exists as a separate phase
+    rather than as a second rewriting pass: "replace this emoji with the markup my
+    application prefers" was never a text change, because the text — the codepoint —
+    is exactly what should still arrive anywhere else.
+
+    A span is refused if it is malformed or overlaps one already taken, so a
+    decorator cannot fight a rewrite or another decorator. Order is load order; a
+    decorator that loses is simply not applied.
+    """
+    taken = list(existing)
+    added: list[tuple[int, int, str]] = []
+    for plugin in plugins:
+        if plugin.decorate is None:
+            continue
+        try:
+            offered = plugin.decorate(text)
+        except Exception:
+            log.exception("Plugin %r failed while decorating; ignoring it", plugin.name)
+            continue
+        if not offered:
+            continue
+        for span in sorted(offered, key=lambda item: item[0]):
+            if not _usable_span(span, text, plugin):
+                continue
+            start, end, markup = span
+            if any(start < other_end and other_start < end for other_start, other_end, _ in taken):
+                log.debug("Plugin %r decoration overlaps an earlier span; skipping", plugin.name)
+                continue
+            taken.append((start, end, markup))
+            added.append((start, end, markup))
+    if added:
+        log.debug("Plugins decorated %d span(s)", len(added))
+    return tuple(added)
+
+
+def _usable_span(span: object, text: str, plugin: Plugin) -> bool:
+    """Is this something a decorator may have meant? Never quotes the text."""
+    if not isinstance(span, tuple) or len(span) != 3:
+        log.error("Plugin %r offered a decoration that is not a 3-tuple", plugin.name)
+        return False
+    start, end, markup = span
+    if not isinstance(start, int) or not isinstance(end, int) or not isinstance(markup, str):
+        log.error("Plugin %r offered a malformed decoration", plugin.name)
+        return False
+    if not 0 <= start < end <= len(text):
+        log.error("Plugin %r offered a decoration outside the text", plugin.name)
+        return False
+    if len(markup) > MAX_REPLACEMENT_CHARS:
+        log.error("Plugin %r offered %d characters of markup", plugin.name, len(markup))
+        return False
+    return True
+
+
 def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
     """Run every plugin over `text`, returning the new text and what should act.
+
+    One pass: every plugin matches the same original transcript, and a claim is
+    accepted unless it overlaps one already taken. Where two plugins want the same
+    words, the lower :attr:`Plugin.altitude` is offered them first — and if it
+    declines by returning ``None``, the next one gets its turn. That is all a
+    fallback chain needs, which is why there is no pipelining here: "not mine"
+    already hands the words on.
 
     Actions are collected rather than run: they belong after the text has been
     inserted, on a thread that is not this one. A plugin with a ``rewrite`` only
@@ -301,7 +381,7 @@ def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
 
     accepted: list[Rewrite] = []
     actions: list[PendingAction] = []
-    for _start, _order, plugin, match in _candidates(text, plugins):
+    for _start, _altitude, _order, plugin, match in _candidates(text, plugins):
         if plugin.rewrite is None:
             if plugin.act is not None:
                 actions.append(PendingAction(plugin, match))
@@ -318,7 +398,10 @@ def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
             actions.append(PendingAction(plugin, match))
 
     if not accepted:
-        return PluginResult(text=text, actions=tuple(actions))
+        # Still decorate: a plugin may want to annotate text nobody rewrote.
+        return PluginResult(
+            text=text, actions=tuple(actions), rich=_decorations(text, plugins, [])
+        )
 
     out: list[str] = []
     rich: list[tuple[int, int, str]] = []
@@ -336,14 +419,15 @@ def apply_plugins(text: str, plugins: list[Plugin]) -> PluginResult:
         written += len(claim.text)
         cursor = claim.end
     out.append(text[cursor:])
+    result = "".join(out)
 
     # Counts and lengths only: the transcript is whatever the user just said.
     log.debug(
         "Plugins rewrote %d span(s) and queued %d action(s)", len(accepted), len(actions)
     )
     return PluginResult(
-        text="".join(out),
+        text=result,
         actions=tuple(actions),
         rewrites=len(accepted),
-        rich=tuple(rich),
+        rich=tuple(rich) + _decorations(result, plugins, rich),
     )

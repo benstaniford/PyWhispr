@@ -53,8 +53,7 @@ import unicodedata
 from functools import lru_cache
 
 from pywhispr.join import CONTINUATION_WORDS
-from pywhispr.plugins.api import Match, Rewrite, Trigger, Word
-from pywhispr.plugins.builtin._teams_emoji import load as load_custom
+from pywhispr.plugins.api import Match, Rewrite, Trigger
 from pywhispr.scratch import SEGMENT_BOUNDARY
 from pywhispr.vocab import edit_distance_within
 
@@ -146,29 +145,18 @@ HOMOPHONES: dict[str, str] = {
 # dictating meant.
 RANGES = (
     (0x1F300, 0x1FAFF),  # pictographs, faces, hands, food, animals, symbols
-    (0x231A, 0x23FF),  # watch, hourglass, media controls
+    (0x231A, 0x231B),  # watch and hourglass
+    (0x23E9, 0x23FA),  # media controls, alarm clock, hourglass with sand
     (0x2600, 0x27BF),  # miscellaneous symbols and dingbats
     (0x2B00, 0x2BFF),  # stars and arrows
 )
+# Those two narrow ranges used to be one 0x231A-0x23FF, which quietly indexed 210
+# non-emoji names — integrals, corner brackets, and U+2322 FROWN, so "frown emoji"
+# answered with the maths symbol ⌢ rather than a face. Ranges here are for
+# *pictographs*; a block that merely contains a couple is not one.
 
 _PUNCTUATION = re.compile(r"[^\w\s]|_")
 _SPACING = re.compile(r"\s+")
-
-# Punctuation the model attached that the emoji should not carry.
-#
-# Every transcript arrives with a full stop appended whether or not the sentence
-# wanted one, and with a comma wherever the model heard the pause before the name
-# — so "Hello smile emoji" comes back as "Hello, <emoji>." Neither mark is how
-# anyone writes an emoji, and the full stop costs something concrete: Teams,
-# Slack and the rest only render the large version when the message is *nothing
-# but* emoji.
-#
-# Only these two marks. "!" and "?" are left alone, because the model does not
-# add those on its own — they are the speaker's, and an emoji is allowed to end
-# an exclamation.
-_ABSORB_BEFORE = ","
-_ABSORB_AFTER = ".…"
-_SPACES = " \t"
 
 # A request ends its clause: punctuation, a line break, or nothing at all after
 # it. Built from the same boundary list scratch.py matches the spoken reset phrase
@@ -575,28 +563,6 @@ def _fuzzy(key: str) -> str | None:
     return None
 
 
-@lru_cache(maxsize=1)
-def _custom() -> dict[str, str]:
-    """Your tenant's own emoji, from the store beside ``vocabulary.txt``.
-
-    Nothing writes that store yet — see :mod:`_teams_emoji` for why every capture
-    route was rejected — so this resolves only what has been put there by hand.
-
-    Loaded lazily and cached, like the Unicode index: someone who has never
-    captured one should not pay for the file read.
-    """
-    return load_custom()
-
-
-def _custom_markup(phrase: str) -> str | None:
-    """The stored markup for `phrase`, if it names a captured custom emoji.
-
-    Checked before every Unicode tier and before the guards, for the same reason
-    ALIASES is: a captured emoji is a decision the user has already made by hand.
-    """
-    return _custom().get(_normalise(phrase))
-
-
 @lru_cache(maxsize=512)
 def _resolve(phrase: str) -> str | None:
     """The character `phrase` names, or None if it does not name one.
@@ -658,37 +624,6 @@ def _is_a_request(match: Match) -> bool:
     return _leads_a_chain(match)
 
 
-def _claim_span(match: Match, first: Word) -> tuple[int, int, str]:
-    """Where the claim runs from and to, plus the separator it has to put back.
-
-    Wider than the name and the trigger: it takes the model's own punctuation with
-    it — see :data:`_ABSORB_BEFORE` and :data:`_ABSORB_AFTER`. The trailing mark
-    goes only when the emoji ends the transcript, so a comma that separates two
-    clauses ("hello, <emoji>, then I left") keeps doing its job.
-
-    Both ends stop at the window the engine gave us, so this can only ever reach
-    punctuation adjacent to words this plugin was shown.
-    """
-    text = match.transcript
-    start = first.start
-    cursor = start
-    while cursor > match.window_start and text[cursor - 1] in _SPACES:
-        cursor -= 1
-    if cursor > match.window_start and text[cursor - 1] in _ABSORB_BEFORE:
-        start = cursor - 1
-        while start > match.window_start and text[start - 1] in _SPACES:
-            start -= 1
-
-    end = match.end
-    if not text[end:].strip(f"{_ABSORB_AFTER}{_SPACES}\r\n"):
-        end = match.window_end
-
-    # Absorbing ", " leaves the emoji hard against the previous word, so the
-    # separator it removed has to come back as a plain space.
-    separator = " " if start > 0 and not text[start - 1].isspace() else ""
-    return start, end, separator
-
-
 def rewrite(match: Match) -> Rewrite | None:
     """Replace "<name> emoji" with the character, or leave the transcript alone.
 
@@ -701,26 +636,9 @@ def rewrite(match: Match) -> Rewrite | None:
         words = match.words_before[-count:]
         phrase = match.transcript[words[0].start : words[-1].end]
 
-        # A captured custom emoji first: it is the user's own, and it is the only
-        # kind that cannot be expressed as a character at all.
-        markup = _custom_markup(phrase)
-        if markup is not None:
-            start, end, separator = _claim_span(match, words[0])
-            # The separator goes into *both* renderings, because the rich span
-            # covers the whole replacement: leave it out of the markup and the
-            # image is spliced over the space, arriving glued to the word before it.
-            #
-            # The plain text is the emoji's name, which is what Teams' own copy
-            # degrades to and what anywhere without HTML will show.
-            return match.claim(
-                start,
-                end,
-                f"{separator}{_normalise(phrase)}",
-                html=f"{separator}{markup}",
-            )
-
         character = _resolve(phrase)
         if character is not None:
-            start, end, separator = _claim_span(match, words[0])
-            return match.claim(start, end, f"{separator}{character}")
+            # claim_absorbing takes the full stop the model appended and any comma it
+            # put before the name — see pywhispr.plugins.api for why those two.
+            return match.claim_absorbing(words[0], character)
     return None

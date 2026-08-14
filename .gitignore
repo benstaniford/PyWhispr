@@ -217,3 +217,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Any local venv, whatever it is called: uv trampolines get quarantined on some
+# managed machines, so a stdlib venv under another name is a common workaround.
+.venv*/
