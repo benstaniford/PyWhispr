@@ -56,6 +56,9 @@ RESET_FEEDBACK_MS = 700
 # silent no-op.
 RESTART_FIELDS = ("api_enabled", "api_host", "api_port", "plugins_enabled", "plugin_actions_enabled")
 
+# Longer than either cue, short enough that a stalled sink cannot hoard them.
+SOUND_MAX_MS = 2000
+
 
 class State(Enum):
     LOADING = auto()
@@ -181,9 +184,6 @@ class PyWhisprApp(QObject):
         self._max_duration_timer.setSingleShot(True)
         self._max_duration_timer.setInterval(cfg.max_recording_seconds * 1000)
         self._max_duration_timer.timeout.connect(self._on_max_duration)
-
-        self._start_sound = self._load_sound("start.wav")
-        self._stop_sound = self._load_sound("stop.wav")
 
         self._hotkey_toggled.connect(self._on_activate)
         self._hotkey_released.connect(self._on_activation_key_released)
@@ -759,10 +759,12 @@ class PyWhisprApp(QObject):
             return
         self._set_state(State.RECORDING)
         self.ducker.duck()
-        self._play(self._start_sound)
         self.overlay.show_recording()
         self.tray.set_status("Recording…", active=True)
         self._max_duration_timer.start()
+        # Last: building the effect enumerates audio endpoints, and a wedged one
+        # must not hold up the overlay.
+        self._play("start.wav")
 
     def _stop_recording(self) -> None:
         self._max_duration_timer.stop()
@@ -773,7 +775,7 @@ class PyWhisprApp(QObject):
             # must get their volume back — Windows would remember the ducked
             # levels forever.
             self.ducker.restore()
-        self._play(self._stop_sound)
+        self._play("stop.wav")
         self._set_state(State.TRANSCRIBING)
         self.overlay.show_status("Transcribing…")
         self.tray.set_status("Transcribing…")
@@ -807,7 +809,7 @@ class PyWhisprApp(QObject):
             log.exception("Could not reset the recording")
             return
         self._max_duration_timer.start()  # the clock starts again with the audio
-        self._play(self._start_sound)
+        self._play("start.wav")
         self.overlay.show_status("Starting over…")
         self.tray.set_status("Recording… (started over)", active=True)
         QTimer.singleShot(RESET_FEEDBACK_MS, self._back_to_recording_overlay)
@@ -1165,9 +1167,6 @@ class PyWhisprApp(QObject):
         self._fillers = filler_words(new.extra_filler_words, new.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(new.voice_reset_phrases)
         self.ducker = create_ducker(new)
-        if new.play_sounds != old.play_sounds:
-            self._start_sound = self._load_sound("start.wav")
-            self._stop_sound = self._load_sound("stop.wav")
         self._max_duration_timer.setInterval(new.max_recording_seconds * 1000)
         if new.input_device_name != old.input_device_name:
             self._missing_device = None  # a new choice deserves its own complaint
@@ -1285,17 +1284,19 @@ class PyWhisprApp(QObject):
 
     # -- sounds --------------------------------------------------------------
 
-    def _load_sound(self, name: str) -> QSoundEffect | None:
+    def _play(self, name: str) -> None:
         if not self.cfg.play_sounds:
-            return None
+            return
+        # One effect per cue, destroyed after it: an effect's sink binds to the
+        # device that was default when the effect was created, and a stalled sink
+        # (headset powered off) hoards its samples until that device comes back,
+        # then empties them all at once. A fresh one always has today's device,
+        # and dropping it takes the sink and anything still queued in it with it.
         effect = QSoundEffect(self)
         effect.setSource(QUrl.fromLocalFile(str(files("pywhispr") / "assets" / name)))
         effect.setVolume(0.4)
-        return effect
-
-    def _play(self, effect: QSoundEffect | None) -> None:
-        if effect is not None:
-            effect.play()
+        effect.play()
+        QTimer.singleShot(SOUND_MAX_MS, effect.deleteLater)
 
 
 def run_app() -> int:
