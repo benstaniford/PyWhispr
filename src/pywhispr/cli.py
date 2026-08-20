@@ -6,7 +6,7 @@ import argparse
 import logging
 import sys
 
-from pywhispr import __version__
+from pywhispr import __version__, flavor
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
         "diagnose", help="print environment details and test-load the model (for bug reports)"
     )
 
+    sub.add_parser(
+        "quit", help="stop the running PyWhispr (used by the installer before an upgrade)"
+    )
+
     return parser
 
 
@@ -79,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
     use_system_certificates()
 
     command = args.command or "run"
+
+    # Before the certificates and before prepare(): this one talks to another
+    # process and exits, so activating DirectML and re-pointing the model cache
+    # for it would be work with nowhere to land. An installer is waiting on it.
+    if command == "quit":
+        return _cmd_quit()
 
     # Storage overrides and the DirectML swap, both of which have to happen before
     # anything imports huggingface_hub or onnxruntime. Shared with the frozen app's
@@ -125,6 +135,26 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_verify_gpu(args.quantization)
 
     return 2
+
+
+def _cmd_quit() -> int:
+    """Stop the running instance, and do not return until it is gone.
+
+    The Windows installer runs this synchronously before it replaces any files,
+    so "the app is gone" is the only success and a bounded wait is the whole
+    contract — there is no timeout on an MSI custom action, so hanging here
+    hangs the install.
+    """
+    from pywhispr.instance import is_running, request_quit
+
+    if not is_running():
+        print(f"{flavor.PRODUCT_NAME} is not running.")
+        return 0
+    if request_quit():
+        print("Stopped.")
+        return 0
+    print("Could not stop the running instance.", file=sys.stderr)
+    return 1
 
 
 def _load_backend(quantization: str | None = None):

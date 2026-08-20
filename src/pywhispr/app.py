@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -86,11 +87,18 @@ class PyWhisprApp(QObject):
     _model_failed = Signal(str)
     _transcribed = Signal(str)
     _transcribe_failed = Signal(str)
+    _quit_requested = Signal()  # another process (an installer) asked us to exit
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, guard=None):
         super().__init__()
         self.cfg = cfg
         self.state = State.LOADING
+        # Ownership of "the one running instance", injected by run_app rather than
+        # reached as module state, so tests that build an app directly claim no
+        # named event and no socket. See pywhispr.instance.
+        self._guard = guard
+        self._quitting = False
+        self._quit_requested.connect(self._on_quit_requested)
 
         self.backend = create_backend(cfg)
         log.debug("Backend selected: %s", self.backend.name)
@@ -233,6 +241,10 @@ class PyWhisprApp(QObject):
                 f"Could not register {self.cfg.hotkey!r}: {exc}. "
                 "Use the tray menu's Settings… to pick a different one.",
             )
+        if self._guard is not None:
+            # emit, not _quit: the watcher calls this from its own thread, and a
+            # queued signal is how everything else here crosses onto the GUI one.
+            self._guard.on_quit(self._quit_requested.emit)
         self._check_double_tap_permission(self.cfg.hotkey)
         if self.reset_listener is not None:
             try:
@@ -478,8 +490,37 @@ class PyWhisprApp(QObject):
         if self._progress_window is not None:
             self._progress_window.finish_model(message)
 
+    @property
+    def quitting(self) -> bool:
+        """Shutting down, from whichever of the two directions. Read by run_app."""
+        return self._quitting
+
+    def _on_quit_requested(self) -> None:
+        """Shut down because something outside asked us to — an installer, or a
+        newer build that has just replaced this one.
+
+        Ends in ``os._exit`` and that is deliberate. ``_quit`` has already done
+        every piece of cleanup that matters (the mixer levels, the audio stream,
+        the API socket, the listeners), but the transcription worker is a
+        ``ThreadPoolExecutor`` whose threads are joined at interpreter exit, so a
+        request arriving during a model load would leave the process alive for as
+        long as that load takes — with an installer synchronously waiting on it.
+        The tray's own Quit does not come through here and is unaffected.
+        """
+        QApplication.closeAllWindows()  # so the UI goes at once, not at exit
+        self._quit()
+        logging.shutdown()
+        os._exit(0)
+
     def _quit(self) -> None:
+        if self._quitting:
+            return  # reachable from the tray and from a quit request at once
+        self._quitting = True
         log.info("Quitting")
+        if self._progress_window is not None:
+            # Or a killed install leaves a pip or Hugging Face download running,
+            # writing into the very directory an upgrade is replacing.
+            self._progress_window.abandon()
         self.listener.stop()
         if self.reset_listener is not None:
             self.reset_listener.stop()
@@ -496,6 +537,8 @@ class PyWhisprApp(QObject):
         self._worker.shutdown(wait=False)
         if self._actions is not None:
             self._actions.stop()
+        if self._guard is not None:
+            self._guard.release()
         QApplication.quit()
 
     def _report_error(self, title: str, message: str) -> None:
@@ -1129,6 +1172,11 @@ class PyWhisprApp(QObject):
         Never raises: losing a dialog's result is annoying, losing the tray app
         is worse.
         """
+        if self._quitting:
+            # A quit request unwinds whatever dialog is open, and the `finally`
+            # that put us here then runs on the way out. Re-registering a global
+            # hotkey for a process that is exiting is at best pointless.
+            return
         try:
             self.listener.start()
         except Exception:
@@ -1167,7 +1215,7 @@ class PyWhisprApp(QObject):
             )
         finally:
             self._resume_listeners()
-        if edited is not None:
+        if edited is not None and not self._quitting:
             self._apply_settings(edited)
 
     def _capture_hotkey(self, current: str) -> str | None:
@@ -1337,6 +1385,7 @@ class PyWhisprApp(QObject):
 def run_app() -> int:
     from PySide6.QtGui import QIcon
 
+    from pywhispr import instance
     from pywhispr.logging_setup import install_qt_message_handler
     from pywhispr.startup import prepare
     from pywhispr.tray import app_pixmap
@@ -1346,12 +1395,26 @@ def run_app() -> int:
     # through. Idempotent, so arriving via cli.main is not a problem.
     config = prepare("run")
 
+    # After prepare(), which has loaded the config and so settled the directory the
+    # ownership files live in, and before anything expensive: a refused launch
+    # should cost no QApplication, no tray icon and above all no model load.
+    guard = instance.acquire()
+    if guard is None:
+        return 0
+
     install_qt_message_handler()  # before QApplication, to catch platform-plugin gripes
     app = QApplication(sys.argv)
     app.setApplicationName(flavor.PRODUCT_NAME)
     app.setWindowIcon(QIcon(app_pixmap()))
     app.setQuitOnLastWindowClosed(False)  # tray app: no windows most of the time
 
-    whispr = PyWhisprApp(config)
+    whispr = PyWhisprApp(config, guard=guard)
     whispr.start()
+    if whispr.quitting:
+        # start() can sit in a modal dialog of its own (the storage offer, the GPU
+        # offer, Lite's server prompt), so a quit request can be served and done
+        # with before the main loop has begun. QApplication.exec() clears the
+        # thread's quitNow flag on entry, so without this the app would come back
+        # from the dead and the installer would have to kill it.
+        return 0
     return app.exec()

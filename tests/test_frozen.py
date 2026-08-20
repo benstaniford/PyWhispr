@@ -22,6 +22,13 @@ class TestFrozenEntryPoint:
         cli.assert_called_once_with(["verify-gpu", "--quantization", ""])
         run_app.assert_not_called()
 
+    def test_the_installer_can_reach_the_quit_command(self):
+        """The MSI runs `PyWhispr.exe quit` before it replaces any file, so this
+        dispatch is a permanent part of the installer's contract."""
+        with patch("pywhispr.cli.main", return_value=0) as cli:
+            assert frozen.run(["quit"]) == 0
+        cli.assert_called_once_with(["quit"])
+
     def test_the_exit_code_is_passed_through(self):
         """cuda.verify() reads it as the verdict."""
         with patch("pywhispr.cli.main", return_value=1):

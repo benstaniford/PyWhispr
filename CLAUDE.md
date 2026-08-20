@@ -641,14 +641,122 @@ upgrade depends on it).
   crashes on load ("Failed to load the default metallib").
 - `setup_msi.py` — cx_Freeze, per-user (no admin). Autostart is an HKCU `Run`
   value in a **component of our own**: the executable's component id comes from
-  cx_Freeze internals (`make_id(f"_cx_executable{idx}_{executable}")`), and CI
-  installs whatever cx_Freeze is current, so borrowing it would break silently.
-  Ours carries a fixed GUID, the registry value as its key path, and a
-  `AUTOSTART<>"0"` condition so the MSI can be run without it. Launch-on-finish
-  is cx_Freeze's own `launch_on_finish` option. None of this can be built or
-  tested off Windows — `msilib` is Windows-only, so `bdist_msi.finalize_options`
-  refuses to run; the most you can check locally is that the option names and
-  emitted table rows are right (stub `HAS_MSILIB`/`add_data` and call
-  `add_config`).
+  cx_Freeze internals (`make_id(f"_cx_executable{idx}_{executable}")`), so
+  borrowing it would break the moment cx_Freeze changed. Ours carries a fixed
+  GUID, the registry value as its key path, and a `AUTOSTART<>"0"` condition so
+  the MSI can be run without it. Launch-on-finish is cx_Freeze's own
+  `launch_on_finish` option. None of this can be built or tested off Windows —
+  `msilib` is Windows-only, so `bdist_msi.finalize_options` refuses to run; what
+  you *can* check locally is the table rows, by loading `setup_msi.py` by path
+  with a stand-in `cx_Freeze` that records the kwargs (`tests/test_setup_msi.py`).
+- **cx_Freeze is pinned in the release workflow, and that is now a correctness
+  dependency, not tidiness.** The stop-the-running-app actions below sit at
+  particular sequence numbers relative to cx_Freeze's own rows (401/402, and a
+  `RemoveExistingProducts` it forces to 1450) and depend on the
+  `REMOVEOLDVERSION`/`REMOVENEWVERSION` property names its `Upgrade` rows set.
+  Those are internals: a floating version could break an upgrade path with a
+  green build. Re-read `bdist_msi.py` when bumping it.
 - `make_icns.sh` / `PyWhispr.ico` — icons; `scripts/make_icon.py` regenerates
   the base PNG (background removal + speech bubble).
+
+## One instance, and upgrades (`instance.py`)
+
+Two upgrades needed this. The Windows MSI replaces files a running `PyWhispr.exe`
+still holds open, so without help it reaches `InstallValidate` and falls back to
+the *files in use* dialog — which asks the user to close an app that has no
+window — or, in a `/qn` install, schedules a reboot. On macOS there is no
+installer: the bundle is dragged over the old one, the replacement succeeds, and
+the **old process keeps running from the deleted inode**, leaving two tray icons,
+two hotkey registrations (the second Carbon `RegisterEventHotKey` fails) and two
+model loads.
+
+- **Ownership is a platform primitive, never a pid file.** A pid file goes stale
+  the instant a process is killed, and the guesswork that follows is how these
+  guards end up either refusing to start after a crash or terminating a stranger
+  that inherited the pid. Both primitives here are released by the OS however the
+  process dies: on Windows a **named event** (the name exists only while a handle
+  is open, and `CreateEventW` reports `ERROR_ALREADY_EXISTS` *atomically*, so two
+  simultaneous launches cannot both win), on POSIX an **exclusive `flock`** on
+  the state file — which is also what makes the pid *in* that file trustworthy,
+  since only the lock holder ever writes it.
+- `Local\`, not `Global\`: the install is per-user, another logged-on user's
+  instance is none of our business, and `Global\` needs a privilege and an ACL to
+  be openable at all. The price is that a per-user MSI pushed in *system* context
+  (Intune) runs its custom action in session 0, where the name refers to a
+  different object — the action does nothing and the files-in-use dialog is what
+  the user gets, i.e. today's behaviour.
+- **The quit signal is a watcher thread, not SIGTERM.** A Python signal handler
+  only runs when the interpreter regains control, and an idle tray app blocked in
+  `QApplication.exec()` may not give it any for minutes. The alternative is a
+  `set_wakeup_fd` + `QSocketNotifier` hop or a permanent polling `QTimer`, both of
+  which put Qt in here — and Qt-free is what lets `cli.py` use this module without
+  importing PySide6 in a process the installer is synchronously waiting on. A
+  thread that blocks until asked is the same shape on both platforms:
+  `WaitForSingleObject` on Windows, `accept()` on a unix socket on POSIX.
+- **`QApplication.exec()` clears the thread's `quitNow` flag on entry, so a quit
+  served before the loop starts is silently lost.** Verified, not assumed: quit
+  before `exec()` and the app runs on regardless. `start()` can sit in a modal
+  dialog of its own (the storage offer, the GPU offer, Lite's server prompt), so
+  this is reachable — hence `run_app` checking `whispr._quitting` before
+  `app.exec()`. Without it the app comes back from the dead and the installer
+  escalates to a kill.
+- **`QApplication.quit()` *does* unwind a modal dialog's nested loop** (
+  `QCoreApplication::exit` exits every event loop on the thread), and that is the
+  trap rather than the fix: the code *after* `exec()` then runs, so
+  `_show_settings`' `finally: self._resume_listeners()` would register a global
+  hotkey for a process that is exiting. Hence `_quitting`, checked in
+  `_resume_listeners` and before `_apply_settings`. `closeAllWindows()` is for
+  making the UI go at once; it is not what unwinds the loop.
+- **`_on_quit_requested` ends in `os._exit(0)`, and the tray's Quit does not.** By
+  then `_quit` has done everything that matters — the mixer levels, the audio
+  stream, the API socket, the listeners, the download in flight — but the
+  transcription worker is a `ThreadPoolExecutor` whose threads are **joined at
+  interpreter exit**, so a request arriving during a 20–60s model load would hold
+  the process open for the whole load with an installer waiting on it.
+- **Displacement is keyed on the version differing, and deliberately not on the
+  executable path.** The version is what does the work: a macOS drag-upgrade
+  replaces the bundle *at the same path*, so `sys.executable` is identical and
+  only the version moves. Adding the path would be worse than useless — it would
+  have `uv run pywhispr` silently kill the installed app and the installed app
+  kill the dev run. Same version ⇒ refuse and leave the running one alone, because
+  restarting it costs the user a model load for nothing.
+- A refused launch is **silent**: there is no tray icon yet to speak from, and the
+  app the user asked for is already running.
+- `request_quit` escalates to `TerminateProcess`/`SIGKILL` after a bounded wait,
+  and **escalates at once when nothing was listening** — an old build with no
+  `quit` command, or a socket that could not be bound, is not something to wait
+  15 seconds for. On Windows the pid is checked against the recorded image with
+  `QueryFullProcessImageNameW` first, so pid reuse cannot make us kill a stranger.
+- Everything is **flavour-scoped** through `config_path().parent` and
+  `flavor.PRODUCT_NAME`: PyWhisprLite is the same codebase carrying the same
+  version string, so a flavour-blind name would have Lite displacing a full
+  install. Note `logging_setup.log_dir()` is *not* flavour-aware, which is why
+  the state does not live there.
+- A unix socket path is limited to ~104 bytes and `~/Library/Application
+  Support/PyWhispr` already spends 68, so failing to bind is a logged warning and
+  not a failure to start. The cost is a force-kill instead of a graceful one.
+- **The MSI runs `PyWhispr.exe quit` before it touches a file, and then
+  `taskkill`.** Two actions, and the order is the point — see `setup_msi.py`. The
+  graceful one runs the *old* build's exe, and every build before this one exits 2
+  on an unknown subcommand, so for exactly one upgrade `taskkill` is the only
+  thing that works; afterwards it is the cure for a wedged instance and for an old
+  install that lives somewhere other than `[TARGETDIR]`. It is second so the
+  graceful path gets first refusal: a killed process leaves the per-app mixer
+  levels turned down, and Windows remembers those forever.
+- `pywhispr quit` is dispatched in `cli.main` **before** the certificates and
+  `startup.prepare()` — re-pointing the model cache and swapping in DirectML for a
+  command that is about to exit is work with nowhere to land. It is also now a
+  permanent part of the installer's contract: the name, and "block until the app is
+  gone".
+- **Never log the state directory's contents beyond pids, versions and counts** —
+  same rule as everywhere else that touches the user's machine.
+- Testing gotcha: `tests/test_instance.py` uses **no `unittest.mock` at all** —
+  real processes, real threads, real sockets — because this is the module whose job
+  is crossing those boundaries, and mocks on a second thread are what hung the
+  suite before. Its `state_dir` fixture puts the socket somewhere *short*: pytest's
+  `tmp_path` overflows `sun_path` and you end up testing the degradation path
+  instead of the feature.
+- Testing gotcha: the guard is **injected** into `PyWhisprApp` rather than reached
+  as module state, which is the whole reason `isolated_app` needs no new patch —
+  the suite builds apps directly, never through `run_app`, so it claims no named
+  event and no socket.

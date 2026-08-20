@@ -87,31 +87,85 @@ class TestEveryEntryPointPrepares:
         assert prepare.call_count in (0, 1)
 
     def test_run_app_prepares_before_building_the_app(self, monkeypatch):
+        order, _ = _fake_run_app(monkeypatch)
         import pywhispr.app as app_module
-
-        order = []
-
-        def fake_prepare(command=None, cfg=None):
-            order.append("prepare")
-            return Config()
-
-        class FakeApp:
-            def __init__(self, _cfg):
-                order.append("app")
-
-            def start(self):
-                order.append("start")
-
-        monkeypatch.setattr("pywhispr.startup.prepare", fake_prepare)
-        monkeypatch.setattr(app_module, "PyWhisprApp", FakeApp)
-        monkeypatch.setattr(app_module, "QApplication", lambda _argv: _FakeQt())
-        monkeypatch.setattr("pywhispr.logging_setup.install_qt_message_handler", lambda: None)
-        monkeypatch.setattr("pywhispr.tray.app_pixmap", lambda: None)
-        monkeypatch.setattr("PySide6.QtGui.QIcon", lambda _pixmap: None)
 
         app_module.run_app()
         assert order[0] == "prepare", order
         assert order.index("prepare") < order.index("app")
+
+    def test_run_app_takes_ownership_before_building_the_app(self, monkeypatch):
+        """A refused launch must cost no tray icon and above all no model load, so
+        the check goes in front of everything expensive — but behind prepare(),
+        which settles the directory the ownership files live in."""
+        order, _ = _fake_run_app(monkeypatch)
+        import pywhispr.app as app_module
+
+        app_module.run_app()
+        assert order.index("prepare") < order.index("acquire") < order.index("app")
+
+    def test_run_app_does_not_start_a_second_copy(self, monkeypatch):
+        """acquire() returning None means an instance of this build is already
+        running: nothing else should happen at all."""
+        order, _ = _fake_run_app(monkeypatch, guard=None)
+        import pywhispr.app as app_module
+
+        assert app_module.run_app() == 0
+        assert "app" not in order and "exec" not in order, order
+
+    def test_run_app_does_not_enter_the_loop_after_a_quit_during_start(self, monkeypatch):
+        """QApplication.exec() clears the thread's quitNow flag on entry, so a quit
+        served inside a dialog opened by start() would otherwise be undone and the
+        app would come back from the dead."""
+        order, _ = _fake_run_app(monkeypatch, quitting_after_start=True)
+        import pywhispr.app as app_module
+
+        assert app_module.run_app() == 0
+        assert "start" in order and "exec" not in order, order
+
+
+def _fake_run_app(monkeypatch, guard="a-guard", quitting_after_start=False):
+    """run_app with every heavyweight collaborator replaced. Returns the call order
+    and the fake app class."""
+    import pywhispr.app as app_module
+
+    order = []
+
+    def fake_prepare(command=None, cfg=None):
+        order.append("prepare")
+        return Config()
+
+    class FakeApp:
+        def __init__(self, _cfg, guard=None):
+            order.append("app")
+            self._guard = guard
+            self._quitting = False
+
+        def start(self):
+            order.append("start")
+            self._quitting = quitting_after_start
+
+        @property
+        def quitting(self):
+            return self._quitting
+
+    class FakeQt(_FakeQt):
+        def exec(self):
+            order.append("exec")
+            return 0
+
+    def fake_acquire():
+        order.append("acquire")
+        return guard
+
+    monkeypatch.setattr("pywhispr.startup.prepare", fake_prepare)
+    monkeypatch.setattr("pywhispr.instance.acquire", fake_acquire)
+    monkeypatch.setattr(app_module, "PyWhisprApp", FakeApp)
+    monkeypatch.setattr(app_module, "QApplication", lambda _argv: FakeQt())
+    monkeypatch.setattr("pywhispr.logging_setup.install_qt_message_handler", lambda: None)
+    monkeypatch.setattr("pywhispr.tray.app_pixmap", lambda: None)
+    monkeypatch.setattr("PySide6.QtGui.QIcon", lambda _pixmap: None)
+    return order, FakeApp
 
     def test_the_cli_prepares_for_a_subcommand(self):
         from pywhispr import cli
@@ -124,6 +178,22 @@ class TestEveryEntryPointPrepares:
         ):
             cli.main(["devices"])
         prepare.assert_called_once_with("devices")
+
+    def test_quit_prepares_nothing(self):
+        """It talks to another process and exits, so re-pointing the model cache and
+        swapping in DirectML for it would be work with nowhere to land — and an
+        installer is synchronously waiting on it."""
+        from pywhispr import cli
+
+        with (
+            patch("pywhispr.startup.prepare") as prepare,
+            patch("pywhispr.certs.use_system_certificates") as certs,
+            patch("pywhispr.instance.is_running", return_value=False),
+            patch("pywhispr.logging_setup.setup_logging", return_value=None),
+        ):
+            assert cli.main(["quit"]) == 0
+        prepare.assert_not_called()
+        certs.assert_not_called()
 
 
 class _FakeQt:

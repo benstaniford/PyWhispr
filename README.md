@@ -22,6 +22,17 @@ there when you reach for the hotkey. To turn the autostart off afterwards, use *
 Manager → Startup apps**; to skip it at install time, run the MSI with
 `msiexec /i PyWhispr-<tag>-windows-x64.msi AUTOSTART=0`. Uninstalling removes it.
 
+### Upgrading
+
+Just run the newer installer. It closes the running copy first — Windows cannot
+replace files an app still has open — and offers to start the new one on the last
+page. In a silent install (`/qn`) nothing restarts it until you next log on.
+
+On macOS, replace the app in `~/Applications` and launch it; the new copy asks the
+old one to exit, so you don't end up with two menu-bar icons. If you ever need to
+stop it from a script, `pywhispr quit` (or `PyWhispr.exe quit` on Windows) waits
+until it's gone.
+
 ## macOS permissions
 
 PyWhispr works with **zero permission grants** out of the box: the global hotkey uses

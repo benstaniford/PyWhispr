@@ -75,8 +75,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --no-dev
 
+      # Pinned, not floating: setup_msi.py's stop-the-running-app custom actions
+      # depend on cx_Freeze's own InstallExecuteSequence numbering (401/402 and a
+      # forced RemoveExistingProducts at 1450) and on the REMOVEOLDVERSION /
+      # REMOVENEWVERSION property names its Upgrade rows set. Those are internals,
+      # so a silent upgrade of cx_Freeze could break an upgrade path with a green
+      # build. Re-check them when bumping this.
       - name: Build MSI
-        run: uv run --with cx_Freeze python packaging/setup_msi.py bdist_msi
+        run: uv run --with cx_Freeze==8.6.4 python packaging/setup_msi.py bdist_msi
 
       - name: Rename MSI
         shell: bash

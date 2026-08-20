@@ -266,6 +266,17 @@ class SetupWindow(QDialog):
     def gpu_running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
+    def abandon(self) -> None:
+        """Stop the download for a shutdown that cannot wait for it.
+
+        Distinct from the Cancel button below, which stays on screen to report
+        what it did: by the time this is called there is nobody left to report to,
+        and an orphaned pip or Hugging Face download would go on writing into the
+        directory an upgrade is busy replacing.
+        """
+        if self._worker is not None:
+            self._worker.cancel()
+
     def _cancel_gpu(self) -> None:
         self._gpu_line.setText("GPU acceleration — cancelling…")
         if self._cancel_button is not None:

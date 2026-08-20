@@ -1154,6 +1154,66 @@ class TestAudioDucking:
         assert isinstance(app.ducker, NoOpDucker)
 
 
+class TestRemoteQuit:
+    """An installer — or a newer build that has just replaced this one — can ask
+    the app to stop. See pywhispr.instance."""
+
+    def test_no_guard_means_nothing_to_release(self, app):
+        """The suite builds apps directly and never goes through run_app, which is
+        what keeps it from claiming a real named event or socket."""
+        assert app._guard is None
+        app._quit()  # must not raise
+
+    def test_quitting_is_idempotent(self, app):
+        """Reachable from the tray and from a request at the same time now."""
+        with patch("pywhispr.app.QApplication.quit") as quit_:
+            app._quit()
+            app._quit()
+        quit_.assert_called_once()
+
+    def test_the_guard_is_released(self, qapp):
+        guard = MagicMock()
+        with isolated_app() as (instance_app, _tray):
+            instance_app._guard = guard
+            with patch("pywhispr.app.QApplication.quit"):
+                instance_app._quit()
+        guard.release.assert_called_once()
+
+    def test_a_request_reaches_the_shutdown(self, qapp):
+        """Emitted on the main thread deliberately: the cross-thread hop is
+        exercised in test_instance.py, which has no mocks to trip over."""
+        with isolated_app() as (instance_app, _tray):
+            with (
+                patch("pywhispr.app.QApplication.quit") as quit_,
+                patch("pywhispr.app.QApplication.closeAllWindows") as close_all,
+                patch("pywhispr.app.os._exit") as hard_exit,
+            ):
+                instance_app._quit_requested.emit()
+            quit_.assert_called_once()
+            close_all.assert_called_once()
+            # The transcription worker's threads are joined at interpreter exit, so
+            # a request during a model load would otherwise hold the process open
+            # for as long as the load takes — with an installer waiting on it.
+            hard_exit.assert_called_once_with(0)
+
+    def test_the_hotkey_is_not_re_armed_while_quitting(self, app):
+        """A request unwinds whatever dialog is open, and the `finally` that
+        re-arms the listener then runs on the way out."""
+        with patch("pywhispr.app.QApplication.quit"):
+            app._quit()
+        app.listener.start.reset_mock()
+        app._resume_listeners()
+        app.listener.start.assert_not_called()
+
+    def test_a_download_in_flight_is_abandoned(self, app):
+        """Or a killed install leaves a pip or Hugging Face download writing into
+        the directory the upgrade is replacing."""
+        app._progress_window = MagicMock()
+        with patch("pywhispr.app.QApplication.quit"):
+            app._quit()
+        app._progress_window.abandon.assert_called_once()
+
+
 class TestHistoryRecall:
     """A transcript that auto-pasted into the wrong window can be pasted again."""
 

@@ -48,7 +48,7 @@ build_exe_options = {
 # condition lets `msiexec /i PyWhispr.msi AUTOSTART=0` opt out.
 AUTOSTART_COMPONENT = "PyWhisprAutoStart"
 AUTOSTART_REGISTRY = "PyWhisprRunKey"
-autostart_data = {
+msi_data = {
     "Property": [("AUTOSTART", "1")],
     "Component": [
         (
@@ -73,6 +73,49 @@ autostart_data = {
     ],
 }
 
+# Stop the running app before any file is replaced. Windows Installer otherwise
+# reaches InstallValidate with PyWhispr.exe holding its own files open and falls
+# back to the "files in use" dialog — which asks the user to close an app that
+# has no window — or, in a quiet install, schedules a reboot.
+#
+# Type 34 is msidbCustomActionTypeExe|...Directory: Source is a Directory key and
+# Target is the command line, run from that directory. cx_Freeze's own
+# launch-on-finish action is 34+192, the 192 being "async, do not wait", so
+# leaving it off is what makes these synchronous — and note that a synchronous
+# custom action has no timeout of its own, which is why `quit` bounds itself.
+# +64 is ...Continue: ignore the exit code, so neither of these can fail an
+# install.
+#
+# Both run at 1398/1399: after CostFinalize (1000) has resolved [TARGETDIR] —
+# before that it would format to nothing — and before InstallValidate (1400)
+# computes files-in-use and cx_Freeze's forced RemoveExistingProducts (1450).
+# cx_Freeze's own rows are at 401 and 402, so nothing collides.
+#
+# The condition keeps them off a first install, where the exe does not exist yet.
+# REMOVEOLDVERSION/REMOVENEWVERSION come from cx_Freeze's Upgrade rows (set by the
+# standard FindRelatedProducts at 25); Installed covers repair, reinstall and
+# uninstall, where the app must also let go of the exe.
+#
+# **Two actions, and the order is the point.** The graceful one runs the *old*
+# build's exe, and any build before this one has no `quit` subcommand — argparse
+# exits 2 and nothing happens. So for exactly one upgrade the taskkill is the only
+# thing that works, and it stays afterwards as the cure for a wedged instance and
+# for an old install that lives somewhere other than [TARGETDIR]. It is second so
+# that the graceful path gets first refusal: it restores the audio mixer levels,
+# which Windows remembers per app and a killed process would leave turned down.
+STOP_ACTION = "PyWhisprStopRunning"
+FORCE_STOP_ACTION = "PyWhisprForceStopRunning"
+STOP_CONDITION = "REMOVEOLDVERSION OR REMOVENEWVERSION OR Installed"
+TASKKILL = '"[SystemFolder]taskkill.exe" /F /IM PyWhispr.exe'
+msi_data["CustomAction"] = [
+    (STOP_ACTION, 34 + 64, "TARGETDIR", '"[TARGETDIR]PyWhispr.exe" quit'),
+    (FORCE_STOP_ACTION, 34 + 64, "SystemFolder", TASKKILL),
+]
+msi_data["InstallExecuteSequence"] = [
+    (STOP_ACTION, STOP_CONDITION, 1398),
+    (FORCE_STOP_ACTION, STOP_CONDITION, 1399),
+]
+
 bdist_msi_options = {
     # Stable across releases so newer MSIs upgrade older installs in place.
     "upgrade_code": "{80F879CB-098B-413D-B82B-EA0CE82A6CB5}",
@@ -82,7 +125,7 @@ bdist_msi_options = {
     # Offer "launch on finish" on the last page. cx_Freeze hides the checkbox
     # when the MSI is being run to uninstall.
     "launch_on_finish": True,
-    "data": autostart_data,
+    "data": msi_data,
 }
 
 setup(
