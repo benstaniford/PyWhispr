@@ -839,7 +839,7 @@ wheels = [
 
 [[package]]
 name = "pywhispr"
-version = "0.2.20"
+version = "0.2.22"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
