@@ -8,6 +8,7 @@ import pytest
 
 from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
+from pywhispr.numbers import NumberResult, Replacement
 from pywhispr.plugins.api import Trigger
 from pywhispr.plugins.engine import Plugin, compile_patterns
 from pywhispr.scratch import compile_reset_phrases
@@ -352,6 +353,63 @@ class TestFillerRemoval:
         app._test_backend.transcribe.return_value = "Um, hello from over there."
         audio = np.zeros(16000, dtype=np.float32)
         assert app._api_transcribe(audio) == "Hello from over there."
+
+
+class TestSpokenNumbers:
+    """Numbers said as words reach the paste as digits."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_converts_a_run_of_numbers(self, app, qtbot):
+        insert = self._dictate(app, qtbot, "Call me on one one eight zero.")
+        insert.assert_called_once_with("Call me on 1180.", ())
+
+    def test_a_lone_number_is_left_as_a_word(self, app, qtbot):
+        insert = self._dictate(app, qtbot, "I have five apples.")
+        insert.assert_called_once_with("I have five apples.", ())
+
+    def test_disabled_by_config(self, app, qtbot):
+        app.cfg.numbers_to_digits = False
+        insert = self._dictate(app, qtbot, "Call me on one one eight zero.")
+        insert.assert_called_once_with("Call me on one one eight zero.", ())
+
+    def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
+        with patch("pywhispr.app.to_digits", side_effect=RuntimeError("boom")):
+            insert = self._dictate(app, qtbot, "Call me on one one eight zero.")
+        insert.assert_called_once_with("Call me on one one eight zero.", ())
+        assert app.state == State.INSERTING
+
+    def test_output_its_spans_do_not_account_for_is_rejected(self, app, qtbot):
+        broken = NumberResult("Something else entirely.", ())
+        with patch("pywhispr.app.to_digits", return_value=broken):
+            insert = self._dictate(app, qtbot, "Call me on one one eight zero.")
+        insert.assert_called_once_with("Call me on one one eight zero.", ())
+
+    def test_a_span_over_something_that_is_not_a_number_is_rejected(self, app, qtbot):
+        # The tripwire that matters: whatever the parser does, it can only ever
+        # have replaced number words.
+        broken = NumberResult("I have 5 apples.", (Replacement(7, 12, "5"),))
+        with patch("pywhispr.app.to_digits", return_value=broken):
+            insert = self._dictate(app, qtbot, "I have apples five.")
+        insert.assert_called_once_with("I have apples five.", ())
+
+    def test_the_vocabulary_still_sees_the_words(self, app, qtbot):
+        """Why numbers run after the vocabulary: an entry may spell one out."""
+        app._vocab = parse_vocabulary("s three => S3")
+        insert = self._dictate(app, qtbot, "Upload it to s three.")
+        insert.assert_called_once_with("Upload it to S3.", ())
+
+    def test_the_api_gets_it_too(self, app):
+        app._test_backend.transcribe.return_value = "The port is nine one four nine."
+        audio = np.zeros(16000, dtype=np.float32)
+        assert app._api_transcribe(audio) == "The port is 9149."
 
 
 class TestPlugins:

@@ -95,6 +95,12 @@ class TestSaving:
         assert cfg.remove_fillers is False
         assert cfg.play_sounds is True  # untouched
 
+    def test_the_numbers_toggle_round_trips(self, build):
+        dialog = build(Config(numbers_to_digits=True))
+        assert dialog._numbers.isChecked()
+        dialog._numbers.setChecked(False)
+        assert self._saved(dialog).numbers_to_digits is False
+
     def test_reset_phrases_are_a_comma_separated_list(self, build):
         dialog = build()
         dialog._reset_phrases.setText("clear clear, scratch scratch ,")

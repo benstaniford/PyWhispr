@@ -199,6 +199,81 @@ Two ways to throw away a sentence that came out wrong:
   - The segment rule applies to whatever is configured, so a user's own
     single-word marker is safe too; an empty list turns the pass off.
 
+## Spoken numbers (`numbers.py`)
+
+Parakeet writes number words as words, so a dictated PIN, phone number, port or
+year arrives as a sentence. Another correction pass over the finished transcript,
+**after vocab and before plugins**: an entry of the user's may spell a number word
+(`s three => S3`, whose key normalises to `sthree` and would no longer match `s 3`),
+and a plugin trigger should see the finished digits for the same reason it sees
+corrected spellings.
+
+- **Two mechanisms, and the split is the whole design.** *Within* a group words
+  compose arithmetically (`twenty five` → 25); *across* groups digit strings are
+  concatenated (`one one eight zero` → 1180). Nothing simpler tells those two apart,
+  and concatenation gets years right for free — `twenty twenty` → `2020`,
+  `nineteen eighty four` → `1984`.
+- **`place` and `min_big` are separate on purpose.** `place` is the magnitude of the
+  last slot filled, and it is what stops `twenty twenty` composing while `twenty
+  five` does: a teen fills tens *and* units, a tens word leaves units open. `hundred`
+  multiplies *within* a chunk rather than closing one, so folding it into `place`
+  breaks either `two thousand three hundred` or `one hundred thousand`, depending
+  which way you fold.
+- **A lone number word is never converted.** `MIN_RUN_WORDS = 2` is the
+  false-trigger guard and it is structural, like `scratch.py`'s doubled phrase:
+  "I have five apples" and "one of the reasons" are prose, and one number word is
+  not a sequence.
+- **`and` is only ever pending**, absorbed once the next word extends the group and
+  otherwise ending the run in front of itself — so a conjunction can never widen a
+  span it did not earn. That alone is not enough: `three hundred and four` really
+  *is* 304, so `between three hundred and four hundred` parses to `chunk = 304` and
+  only the *second* `hundred` reveals the `and` was a conjunction. Hence **a scale
+  word that cannot extend backtracks** past the absorbed `and` and ends the run
+  there, giving `between 300 and 400`. A bigger lookahead cannot fix this; the
+  disambiguator arrives two words late by construction.
+- **A run whose first token is a scale word is refused whole**, never partially
+  rescanned. `hundred` cannot start a numeral, so `a hundred and ten thousand` would
+  otherwise drop its head and emit `a 10000` — much worse than leaving the sentence
+  alone. Every other refusal *does* retry from the next token, which is what turns
+  `Oh, one hundred.` into `Oh, 100.`
+- **A comma or dash always ends a group**, and punctuation is absorbed only
+  *between* groups. The model punctuates where it heard a pause and a spoken number
+  is all pauses, so absorbing it is what makes `One, one, eight, zero.` → `1180.`
+  work at all — but allowing it *inside* a group would turn "I've got twenty, five
+  of which are broken" into "I've got 25 of which are broken". The price is
+  `twenty-five` no longer converting, which is no loss: it was already written
+  correctly.
+- **A punctuated run needs 3+ groups, every one a single digit.** A PIN, phone
+  number or code is a digit run; a spoken list of two is not. This is what keeps
+  `one, two, or three` and `thirty, forty, fifty percent` intact — absorbing
+  punctuation without it turns the first of those into `12, or three`.
+- **`oh` needs two thresholds.** It is the spoken zero of every phone number *and*
+  an interjection: 3+ groups for a run containing one, 4+ single-digit groups for a
+  run led by one. Refusing a leading `oh` outright was the first design and it is
+  wrong — `oh seven eight one two three four five` is a UK mobile whose leading zero
+  is the entire point. `oh` survives filler removal (it is deliberately absent from
+  `DEFAULT_FILLERS`, and `PROTECTED_FOLLOWERS` guards it in "uh oh"), so this pass
+  is the only thing standing between an interjection and a digit.
+- **The tripwire is a proof, not a ratio.** vocab's 0.5–2× length check would reject
+  every legitimate conversion (`one one eight zero` → `1180` is 0.22), and a
+  `(str, str) -> bool` "skeleton" comparison cannot work: to avoid false-rejecting
+  `One, one, eight, zero.` it would have to re-implement the separator rules and the
+  `and` flag, and a tripwire that duplicates the pass shares its bugs. So `to_digits`
+  returns its **spans** and `is_digit_substitution` checks them — ordered,
+  non-overlapping, digits out, nothing but number words in, and re-splicing
+  reproduces the text. Whatever the parser does, it can only have replaced a number.
+- **The trade taken knowingly:** `twenty twenty` → `2020` and `thirty forty percent`
+  → `3040 percent` are the *same shape*. There is no structural rule that keeps one
+  and rejects the other, so the config bool is the escape hatch — which is also why
+  there is no second knob. Ordinals, decimals, fractions, `double oh seven` and `a`
+  as one are all out: `a` in particular would turn `a million thanks` into
+  `1000000 thanks`.
+- Tokens are **letters only** (`[^\W\d_]+`), not `vocab._WORD`, which folds an
+  internal hyphen into one token and matches bare digits. The gap between two words
+  must `fullmatch` a separator, which is how a stray digit (`one 2 three`), a
+  newline or a full stop keeps its sentence intact.
+- **Never log the transcript or the words matched** — span counts only.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing

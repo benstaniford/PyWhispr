@@ -26,6 +26,7 @@ from pywhispr.hotkey import create_hotkey_listener
 from pywhispr.injector import TextInjector
 from pywhispr.join import join_text
 from pywhispr.logging_setup import log_environment, log_path
+from pywhispr.numbers import is_digit_substitution, to_digits
 from pywhispr.platform_setup import MACOS_PERMISSIONS_HELP, warn_if_missing_permissions
 from pywhispr.plugins.actions import ActionRunner
 from pywhispr.plugins.engine import PendingAction, apply_plugins
@@ -554,8 +555,9 @@ class PyWhisprApp(QObject):
 
         No continuation joining: that belongs to the local dictation cycle,
         which has a caret to join onto. A remote caller has neither that nor
-        any session. Filler removal and the vocabulary do apply, because they
-        are standing preferences about the text rather than session state.
+        any session. Filler removal, the vocabulary and spoken numbers do apply,
+        because they are standing preferences about the text rather than session
+        state.
 
         Plugins apply too, but only their rewrites — never their actions. This
         port is open to the LAN with no authentication (see ``config.api_host``),
@@ -566,7 +568,7 @@ class PyWhisprApp(QObject):
         text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
-        corrected = self._corrected(self._cleaned(self._after_reset(text)))
+        corrected = self._numbered(self._corrected(self._cleaned(self._after_reset(text))))
         return self._via_plugins(corrected, collect_actions=False)
 
     # -- state transitions (main thread only) --------------------------------
@@ -834,9 +836,12 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        # Vocabulary, then plugins: each can change the opening word, and the join
-        # decides about whatever the last of them leaves there.
-        corrected = self._via_plugins(self._corrected(text))
+        # Vocabulary, then numbers, then plugins: each can change the opening
+        # word, and the join decides about whatever the last of them leaves
+        # there. Numbers after the vocabulary because an entry of the user's may
+        # spell a number word ("s three => S3"), and before the plugins so a
+        # trigger sees the finished digits.
+        corrected = self._via_plugins(self._numbered(self._corrected(text)))
         if not corrected.strip():
             # A dictation that was nothing but a command. There is no text to
             # paste and none worth remembering, but the action still runs.
@@ -920,6 +925,36 @@ class PyWhisprApp(QObject):
             )
             return text
         return corrected
+
+    def _numbered(self, text: str) -> str:
+        """Write spoken numbers as digits, degrading to the transcript untouched.
+
+        Wrapped like _corrected: the audio is gone by now. The vocabulary's
+        length ratio would be the wrong tripwire — "one one eight zero"
+        legitimately becomes a quarter of its length — so the pass hands back
+        the spans it claims to have replaced and is_digit_substitution proves
+        the splice instead, the way the plugin engine does.
+
+        Before the join, necessarily: a leading digit is not a word
+        join.lowercase_first_word can re-case, and it still earns its space.
+        """
+        if not text or not self.cfg.numbers_to_digits:
+            return text
+        try:
+            result = to_digits(text)
+        except Exception:
+            log.exception("Numbers pass failed; using the transcript as it was")
+            return text
+        if not is_digit_substitution(text, result):
+            log.error(
+                "Numbers pass produced %d characters from %d that do not follow "
+                "from its %d span(s); using the transcript as it was",
+                len(result.text),
+                len(text),
+                len(result.spans),
+            )
+            return text
+        return result.text
 
     def _via_plugins(self, text: str, *, collect_actions: bool = True) -> str:
         """Let the plugins rewrite the transcript, degrading to it untouched.
