@@ -63,7 +63,7 @@ Tray menu → **Settings…**. Three tabs:
 - **Dictation** — the hotkey, the start-over hotkey, the microphone, the
   auto-stop guard, start/stop sounds, and ducking other applications.
 - **Text** — filler removal, continuation joining, the custom vocabulary (and its
-  editor), and the spoken start-over phrases.
+  editor), spoken numbers as digits, and the spoken start-over phrases.
 - **Advanced** — plugins, GPU acceleration, the network API (or, in the Lite
   build, the transcription server), and buttons for the config and log files.
 
@@ -109,6 +109,7 @@ the rest are typed once and left alone, which is why they are not on it.
 | `keep_filler_words` | `[]` | Built-in fillers to leave alone, e.g. `["er", "well"]` |
 | `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via **Settings… → Text → Edit vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
+| `numbers_to_digits` | `true` | Write [spoken numbers](#spoken-numbers) as digits — *one one eight zero* becomes `1180` |
 | `plugins_enabled` | `true` | Run [plugins](#plugins) — a phrase you say and what happens when you say it |
 | `plugin_actions_enabled` | `true` | Let plugins do things as well as rewrite text. `false` keeps their text changes and stops anything reaching outside PyWhispr |
 | `plugins` | `{}` | Per-plugin settings, e.g. `[plugins.emoji]` with `enabled = false` |
@@ -206,6 +207,39 @@ draws that line. (Wispr Flow does this with a fine-tuned LLM cleanup pass in the
 cloud; PyWhispr is local and has no such pass.) Note also that recent Parakeet
 models drop most hesitations by themselves, so on a good recording this pass
 often has nothing to do.
+
+
+## Spoken numbers
+
+Read a PIN, a phone number, a port or a year out loud and the model writes it in
+words. PyWhispr turns a **run of two or more numbers** into digits:
+
+| said | typed |
+| --- | --- |
+| call me on one one eight zero | `call me on 1180` |
+| twenty five people | `25 people` |
+| one hundred and eighty pounds | `180 pounds` |
+| the port is nine one four nine | `the port is 9149` |
+| it was nineteen eighty four | `it was 1984` |
+| seven oh two | `702` |
+
+Numbers that compose into one are worked out (*twenty five* → `25`, *two thousand
+and twenty four* → `2024`); numbers that cannot are written one after another,
+which is what a year or a code sounds like (*twenty twenty* → `2020`). Commas and
+dashes between numbers are the model's own — it punctuates where it heard you
+pause — so *"One, one, eight, zero."* still comes out `1180.`
+
+**A single number word is always left as a word.** *"I have five apples"* and
+*"one of the reasons"* are untouched, which is what keeps the pass out of ordinary
+prose. For the same reason a number split up by punctuation needs three or more of
+them (a code, not a list), so *"one, two, or three"* is safe.
+
+**What this does not do.** Ordinals (*first*), decimals (*three point five*),
+fractions, *double oh seven* and *a hundred* (*a* is not read as one — *a million
+thanks* should not become `1000000 thanks`). Set `numbers_to_digits = false`, or
+untick **Settings… → Text → Numbers**, to turn the whole thing off.
+
+
 ## Speed
 
 Transcription runs on the CPU unless a CUDA 13 runtime and cuDNN 9 are present.

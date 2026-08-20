@@ -56,6 +56,7 @@ EDITED_FIELDS = (
     "lowercase_continuations",
     "vocabulary_enabled",
     "vocabulary_fuzzy",
+    "numbers_to_digits",
     "voice_reset_phrases",
     "plugins_enabled",
     "plugin_actions_enabled",
@@ -185,6 +186,11 @@ class SettingsDialog(QDialog):
             form.addRow("", self._with_button(self._vocab_fuzzy, "Edit vocabulary…", on_edit_vocabulary))
         else:
             form.addRow("", self._vocab_fuzzy)
+
+        self._numbers = self._check(
+            'Write spoken numbers as digits ("one one eight zero" → 1180)', "numbers_to_digits"
+        )
+        form.addRow("Numbers", self._numbers)
 
         self._reset_phrases = QLineEdit(", ".join(self.config.voice_reset_phrases))
         self._reset_phrases.setPlaceholderText("clear clear")
@@ -359,6 +365,7 @@ class SettingsDialog(QDialog):
         cfg.lowercase_continuations = self._lowercase.isChecked()
         cfg.vocabulary_enabled = self._vocab_enabled.isChecked()
         cfg.vocabulary_fuzzy = self._vocab_fuzzy.isChecked()
+        cfg.numbers_to_digits = self._numbers.isChecked()
         cfg.voice_reset_phrases = [
             phrase.strip() for phrase in self._reset_phrases.text().split(",") if phrase.strip()
         ]

@@ -109,6 +109,10 @@ class Config:
     # near miss on longer terms; turn it off to only ever match them exactly.
     vocabulary_enabled: bool = True
     vocabulary_fuzzy: bool = True
+    # Spoken numbers written as digits: "one one eight zero" -> 1180, "twenty
+    # five" -> 25. Only a run of two or more numbers is converted, so a lone
+    # number word is left as a word ("one of the reasons"). See numbers.py.
+    numbers_to_digits: bool = True
     # Plugins: a phrase you say, and what happens when you say it (Settings… →
     # Advanced → Open folder…). plugins_enabled is the master switch;
     # plugin_actions_enabled leaves plugins able to rewrite text but stops them
