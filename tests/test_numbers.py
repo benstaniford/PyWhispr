@@ -83,11 +83,68 @@ class TestLoneNumbers:
             "nine to five",
             "one on one",
             "there can be only one",
-            "three point five",
         ],
     )
     def test_untouched(self, said):
         assert digits(said) == said
+
+
+class TestDecimalPoint:
+    """"point" separates, and both mechanisms then apply either side of it."""
+
+    @pytest.mark.parametrize(
+        ("said", "wanted"),
+        [
+            ("twenty six point two", "26.2"),
+            # However the integer part was said, the answer is the same number.
+            ("two six point two", "26.2"),
+            ("three point five", "3.5"),
+            # A fraction is read digit by digit, and concatenation gets it right
+            # whichever way the model wrote it.
+            ("one point two five", "1.25"),
+            ("one point two three four five", "1.2345"),
+            ("twenty six point two five", "26.25"),
+            ("one point zero five", "1.05"),
+            ("one hundred and eighty point five", "180.5"),
+            ("twenty six point two percent", "26.2 percent"),
+            ("section two point one", "section 2.1"),
+        ],
+    )
+    def test_converts(self, said, wanted):
+        assert digits(said) == wanted
+
+    @pytest.mark.parametrize(
+        "said",
+        [
+            # "point" is an ordinary word, so it needs a number on both sides.
+            "the two point plan",
+            "one point I want to make",
+            "he made the same three point argument",
+            "on point two of the agenda",
+        ],
+    )
+    def test_needs_a_number_on_both_sides(self, said):
+        assert digits(said) == said
+
+    @pytest.mark.parametrize(
+        ("said", "wanted"),
+        [
+            # The scale belongs to the number as a whole, and 1.5000000 is not a
+            # number anybody said.
+            ("one point five million", "1.5 million"),
+            # A run ending at a "point" leaves it where the model put it.
+            ("twenty six point", "26 point"),
+            # A comma has already ended the run, so this "point" is the
+            # sentence's own.
+            ("twenty six, point two", "26, point two"),
+            # Inside the fraction, a comma is the sentence's too.
+            ("one point two, three of them", "1.2, three of them"),
+            # One decimal point per number: a version string is not a decimal.
+            ("version one point two point three", "version 1.2 point three"),
+        ],
+    )
+    def test_reaches_only_as_far_as_the_fraction(self, said, wanted):
+        assert digits(said) == wanted
 
 
 class TestAnd:
@@ -255,9 +312,19 @@ class TestTheTripwire:
         claimed = NumberResult("I have five 0", (Replacement(12, 18, "0"),))
         assert not is_digit_substitution(said, claimed)
 
+    def test_accepts_a_decimal(self):
+        said = "twenty six point two"
+        assert is_digit_substitution(said, to_digits(said))
+
     def test_rejects_a_replacement_that_is_not_digits(self):
         said = "one two"
         claimed = NumberResult("twelve", (Replacement(0, 7, "twelve"),))
+        assert not is_digit_substitution(said, claimed)
+
+    @pytest.mark.parametrize("digits_out", ["1.", ".5", "1.2.3", "1,2"])
+    def test_rejects_a_replacement_that_is_not_one_number(self, digits_out):
+        said = "twenty six point two"
+        claimed = NumberResult(digits_out, (Replacement(0, len(said), digits_out),))
         assert not is_digit_substitution(said, claimed)
 
     def test_rejects_spans_out_of_order_or_overlapping(self):
@@ -279,8 +346,12 @@ class TestTheTripwire:
             ("One, one, eight, zero", True),
             ("one hundred and eighty", True),
             ("seven-three-two", True),
+            ("two point five", True),
             ("one apple", False),
             ("one. two", False),
+            # An infix word may only sit between two numbers, never at an edge.
+            ("one hundred and", False),
+            ("point five", False),
         ],
     )
     def test_what_a_span_may_cover(self, span, wanted):
@@ -296,6 +367,8 @@ class TestIdempotence:
             "between three hundred and four hundred",
             "twenty twenty",
             "I have five apples",
+            "twenty six point two",
+            "one point five million",
         ],
     )
     def test_a_second_pass_changes_nothing(self, said):

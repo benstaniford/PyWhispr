@@ -12,6 +12,11 @@ Two mechanisms, and the split between them is the whole design:
 * **Across groups**, digit strings are concatenated, so "one one eight zero" is
   1180 — and "twenty twenty" is 2020, which is what a year sounds like.
 
+"point" is neither: it is a *separator*, like a comma, that puts a decimal point
+in the output. Both mechanisms then apply either side of it, which is what makes
+"twenty six point two" and "two six point two" both 26.2, and "one point two
+five" 1.25.
+
 A **lone** number word is never touched. That is the false-trigger guard, and it
 is structural rather than a heuristic, the same way ``scratch.py``'s doubled
 phrase is: "I have five apples" and "one of the reasons" come out untouched
@@ -19,10 +24,9 @@ because one number word is not a number *sequence*. Everything else here leans
 the same way — a wrong substitution in the middle of a sentence is worse than a
 number left as words.
 
-Deliberately not handled: ordinals ("first"), decimals ("three point five"),
-fractions, "double oh seven", currency, and "a" as one. Each is its own
-decision, and "a" is the tempting one to get wrong: it would turn "a million
-thanks" into "1000000 thanks".
+Deliberately not handled: ordinals ("first"), fractions, "double oh seven",
+currency, and "a" as one. Each is its own decision, and "a" is the tempting one
+to get wrong: it would turn "a million thanks" into "1000000 thanks".
 """
 
 from __future__ import annotations
@@ -74,8 +78,13 @@ BIG = {"thousand": 1000, "million": 10**6, "billion": 10**9, "trillion": 10**12}
 ZERO_WORDS = frozenset({"zero", "oh", "nought", "naught"})
 # The one word that can sit inside a numeral without being a number itself.
 CONJUNCTION = "and"
+# The decimal point. Deliberately *not* a number word: it names no value, it
+# cannot begin a run, and a run that ends at one leaves it where it was.
+POINT = "point"
+# The two words a run may carry that are not numbers.
+INFIX_WORDS = frozenset({CONJUNCTION, POINT})
 
-# Every word this pass recognises. Note what is absent: "a" and "an", "point",
+# Every word this pass recognises as a value. Note what is absent: "a" and "an",
 # "half", "quarter", "dozen", "nil", the ordinals, and the plurals "hundreds"
 # and "thousands" — so "hundreds of people" never begins a run at all.
 NUMBER_WORDS = frozenset({*UNITS, *TEENS, *TENS, *BIG, *ZERO_WORDS, HUNDRED})
@@ -106,15 +115,21 @@ _PLAIN_GAP = re.compile(f"[{_SPACES}]+")
 _PUNCTUATED_GAP = re.compile(f"[{_SPACES}]*[,\\-–—][{_SPACES}]*")
 
 _ANY_NUMBER_WORD = "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
+_ANY_INFIX_WORD = "|".join(sorted(INFIX_WORDS, key=len, reverse=True))
 _ANY_GAP = f"(?:[{_SPACES}]+|[{_SPACES}]*[,\\-–—][{_SPACES}]*)"
-# What a replaced span is allowed to have been: number words, the separators
-# above and "and". This is the invariant the caller checks, and it is why a bug
-# in the parser can only ever cost digits, never words.
+# What a replaced span is allowed to have been: number words separated by the
+# gaps above, with an infix word ("and", "point") allowed only *between* two of
+# them. This is the invariant the caller checks, and it is why a bug in the
+# parser can only ever cost digits, never words — a span cannot begin or end
+# with an infix word, so a stray "and" or "point" is never swallowed at an edge.
 _ONLY_NUMBER_WORDS = re.compile(
-    rf"(?:{_ANY_NUMBER_WORD})(?:{_ANY_GAP}(?:{_ANY_NUMBER_WORD}|{CONJUNCTION}))*",
+    rf"(?:{_ANY_NUMBER_WORD})"
+    rf"(?:{_ANY_GAP}(?:(?:{_ANY_INFIX_WORD}){_ANY_GAP})?(?:{_ANY_NUMBER_WORD}))*",
     re.IGNORECASE,
 )
-_DIGITS = re.compile(r"[0-9]+")
+# What a replacement is allowed to be: digits, with at most one decimal point
+# and a digit either side of it.
+_DIGIT_OUTPUT = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 
 
 @dataclass(frozen=True)
@@ -261,17 +276,17 @@ def _tokens(text: str) -> list[_Token]:
 def _extent(tokens: list[_Token], start: int) -> int:
     """One past the last token of the run beginning at `start`.
 
-    A run is number words joined by separators, and may carry "and" inside it —
-    but never as its last word, which would put the conjunction of the next
-    clause inside the span.
+    A run is number words joined by separators, and may carry an infix word
+    ("and", "point") inside it — but never as its last word, which would put the
+    conjunction of the next clause, or a sentence's own "point", inside the span.
     """
     end = start + 1
     while end < len(tokens) and tokens[end].link != _BROKEN:
         word = tokens[end].word
-        if word not in NUMBER_WORDS and word != CONJUNCTION:
+        if word not in NUMBER_WORDS and word not in INFIX_WORDS:
             break
         end += 1
-    while end > start and tokens[end - 1].word == CONJUNCTION:
+    while end > start and tokens[end - 1].word in INFIX_WORDS:
         end -= 1
     return end
 
@@ -281,13 +296,17 @@ class _Run:
     """What a scan of one run consumed, and everything the guards need to see."""
 
     groups: list[int]
-    words: int  # number words consumed; "and" does not count
+    words: int  # number words consumed; the infix words do not count
     last: int  # index of the last token consumed
     punctuated: bool  # was any group boundary a comma or a dash?
+    point_at: int | None = None  # the group the decimal point sits in front of
 
     @property
     def digits(self) -> str:
-        return "".join(str(value) for value in self.groups)
+        parts = [str(value) for value in self.groups]
+        if self.point_at is None:
+            return "".join(parts)
+        return f"{''.join(parts[: self.point_at])}.{''.join(parts[self.point_at :])}"
 
 
 def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
@@ -304,6 +323,11 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     * An **"and" is only ever pending**: it is absorbed once the word after it
       extends the group, and otherwise the run ends in front of it. So a
       conjunction can never widen a span it did not earn.
+    * A **"point"** closes the group and marks where the decimal point goes,
+      but only once, only between two number words (see _fraction_follows) and
+      only where no comma has already broken the run. Inside the fraction a
+      comma or a scale word ends the run rather than joining it, which is what
+      leaves "one point five million" as 1.5 million instead of 1.5000000.
     """
     groups: list[int] = []
     group: _Group | None = None
@@ -311,6 +335,7 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     last = -1
     punctuated = False
     pending_and = False
+    point_at: int | None = None
     # Where to rewind to if a scale word later proves the absorbed "and" was a
     # conjunction: the groups, value and word count as they were in front of it.
     rewind: tuple[int, int, int] | None = None
@@ -324,6 +349,20 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     for index in range(start, end):
         token = tokens[index]
         word = token.word
+        if point_at is not None and (token.link == _PUNCTUATED or _is_scale(word)):
+            # A fraction is a digit sequence and nothing else: the scale belongs
+            # to the number as a whole ("one point five million"), and a comma
+            # after the fraction is the sentence's, not the number's.
+            break
+        if word == POINT:
+            if pending_and or punctuated or point_at is not None or token.link != _PLAIN:
+                break
+            if not _fraction_follows(tokens, index, end):
+                break
+            close()
+            point_at = len(groups)
+            rewind = None
+            continue
         if word == CONJUNCTION:
             # Not after a comma, and not before a scale has been applied: both
             # would be an ordinary conjunction ("one and two", "one hundred, and
@@ -370,7 +409,31 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
         words += 1
         last = index
     close()
-    return _Run(groups, words, last, punctuated) if groups and last >= start else None
+    if not groups or last < start:
+        return None
+    return _Run(groups, words, last, punctuated, point_at)
+
+
+def _fraction_follows(tokens: list[_Token], index: int, end: int) -> bool:
+    """Is the "point" at `index` followed by the digits of a fraction?
+
+    This is the false-trigger guard for the decimal point, and it is the same
+    shape as every other one here: structural, not a heuristic. "point" is an
+    ordinary English word, so it only counts where a number word sits on each
+    side of it with nothing but spacing between — "the two point plan" and "one
+    point I want to make" have no number after it and are left alone. A scale
+    word is not a fraction ("one point five million"), and the number in front
+    is guaranteed by a run only ever starting at a number word.
+    """
+    after = index + 1
+    if after >= end:
+        return False
+    follower = tokens[after]
+    return (
+        follower.link == _PLAIN
+        and follower.word in NUMBER_WORDS
+        and not _is_scale(follower.word)
+    )
 
 
 def _last_before_and(tokens: list[_Token], start: int, index: int) -> int:
@@ -389,6 +452,8 @@ def _convertible(run: _Run, tokens: list[_Token], start: int) -> bool:
     """
     if run.words < MIN_RUN_WORDS:
         return False  # one number word is not a number sequence
+    if run.point_at is not None and not 0 < run.point_at < len(run.groups):
+        return False  # a decimal point with nothing on one side of it
     single_digits = all(0 <= value <= 9 for value in run.groups)
     if run.punctuated and (len(run.groups) < MIN_PUNCTUATED_GROUPS or not single_digits):
         return False
@@ -466,7 +531,7 @@ def is_digit_substitution(original: str, result: NumberResult) -> bool:
     for span in result.spans:
         if not cursor <= span.start < span.end <= len(original):
             return False
-        if not _DIGITS.fullmatch(span.digits):
+        if not _DIGIT_OUTPUT.fullmatch(span.digits):
             return False
         if not replaces_only_number_words(original, span.start, span.end):
             return False

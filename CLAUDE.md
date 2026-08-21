@@ -213,6 +213,19 @@ corrected spellings.
   concatenated (`one one eight zero` → 1180). Nothing simpler tells those two apart,
   and concatenation gets years right for free — `twenty twenty` → `2020`,
   `nineteen eighty four` → `1984`.
+- **`point` is a third thing: a separator, not a value.** It closes the group and
+  puts a `.` in the output, so both mechanisms then run either side of it and
+  `twenty six point two` and `two six point two` are both `26.2`, `one point two
+  five` is `1.25`. It is an ordinary English word, so the guard is the same shape as
+  every other one here — structural, not a heuristic: **a number word on each side
+  with nothing but spacing between** (`_fraction_follows`), which is what leaves
+  `the two point plan` and `one point I want to make` alone. One point per run: a
+  version string is not a decimal, so `one point two point three` converts as far as
+  `1.2`. Inside the fraction a comma or a **scale word ends the run** rather than
+  joining it — `one point five million` is `1.5 million`, and folding the scale in
+  would have emitted `1.5000000`, which is the shape this got wrong before decimals
+  were handled at all (the fraction was converting *on its own*: `one point 25`).
+  `two point oh` is left as words, because the `oh` thresholds below outrank this.
 - **`place` and `min_big` are separate on purpose.** `place` is the magnitude of the
   last slot filled, and it is what stops `twenty twenty` composing while `twenty
   five` does: a teen fills tens *and* units, a tens word leaves units open. `hundred`
@@ -262,12 +275,15 @@ corrected spellings.
   returns its **spans** and `is_digit_substitution` checks them — ordered,
   non-overlapping, digits out, nothing but number words in, and re-splicing
   reproduces the text. Whatever the parser does, it can only have replaced a number.
+  The decimal point widens both halves of that proof by exactly one step — the output
+  may carry one `.` with a digit either side, and `and`/`point` are allowed in the
+  span only *between* two number words, never at an edge, so neither can be swallowed
+  off the end of a run.
 - **The trade taken knowingly:** `twenty twenty` → `2020` and `thirty forty percent`
   → `3040 percent` are the *same shape*. There is no structural rule that keeps one
   and rejects the other, so the config bool is the escape hatch — which is also why
-  there is no second knob. Ordinals, decimals, fractions, `double oh seven` and `a`
-  as one are all out: `a` in particular would turn `a million thanks` into
-  `1000000 thanks`.
+  there is no second knob. Ordinals, fractions, `double oh seven` and `a` as one are
+  all out: `a` in particular would turn `a million thanks` into `1000000 thanks`.
 - Tokens are **letters only** (`[^\W\d_]+`), not `vocab._WORD`, which folds an
   internal hyphen into one token and matches bare digits. The gap between two words
   must `fullmatch` a separator, which is how a stray digit (`one 2 three`), a
