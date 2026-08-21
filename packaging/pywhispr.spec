@@ -35,6 +35,16 @@ import os
 mlx_dir = importlib.util.find_spec("mlx").submodule_search_locations[0]
 datas += [(os.path.join(mlx_dir, "lib", "mlx.metallib"), ".")]
 
+# The version string, read from the source rather than hard-coded, so the bundle
+# tracks the number make-release bumps.
+import re
+
+version = "0.0.0"
+with open(os.path.join(SPECPATH, "..", "src", "pywhispr", "__init__.py")) as f:
+    match = re.search(r'^__version__ = "(.+)"', f.read(), re.MULTILINE)
+    if match:
+        version = match.group(1)
+
 a = Analysis(
     ["launch.py"],
     pathex=["../src"],
@@ -65,6 +75,6 @@ app = BUNDLE(
         "LSUIElement": True,  # menu-bar app: no Dock icon, no app switcher entry
         "NSMicrophoneUsageDescription": "PyWhispr records your voice to transcribe it locally.",
         "NSHighResolutionCapable": True,
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleShortVersionString": version,
     },
 )
