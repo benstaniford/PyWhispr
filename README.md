@@ -74,7 +74,8 @@ Tray menu → **Settings…**. Three tabs:
 - **Dictation** — the hotkey, the start-over hotkey, the microphone, the
   auto-stop guard, start/stop sounds, and ducking other applications.
 - **Text** — filler removal, continuation joining, the custom vocabulary (and its
-  editor), spoken numbers as digits, and the spoken start-over phrases.
+  editor), spoken numbers as digits, spoken letters joined into codes, and the
+  spoken start-over phrases.
 - **Advanced** — plugins, GPU acceleration, the network API (or, in the Lite
   build, the transcription server), and buttons for the config and log files.
 
@@ -121,6 +122,7 @@ the rest are typed once and left alone, which is why they are not on it.
 | `vocabulary_enabled` | `true` | Apply your [custom vocabulary](#custom-vocabulary) to transcripts — edit the list via **Settings… → Text → Edit vocabulary…** |
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `numbers_to_digits` | `true` | Write [spoken numbers](#spoken-numbers) as digits — *one one eight zero* becomes `1180` |
+| `letters_to_acronyms` | `true` | Join [spoken letters and codes](#spoken-letters-and-codes) — *E P M one one eight zero* becomes `EPM-1180` |
 | `plugins_enabled` | `true` | Run [plugins](#plugins) — a phrase you say and what happens when you say it |
 | `plugin_actions_enabled` | `true` | Let plugins do things as well as rewrite text. `false` keeps their text changes and stops anything reaching outside PyWhispr |
 | `plugins` | `{}` | Per-plugin settings, e.g. `[plugins.emoji]` with `enabled = false` |
@@ -249,6 +251,44 @@ them (a code, not a list), so *"one, two, or three"* is safe.
 fractions, *double oh seven* and *a hundred* (*a* is not read as one — *a million
 thanks* should not become `1000000 thanks`). Set `numbers_to_digits = false`, or
 untick **Settings… → Text → Numbers**, to turn the whole thing off.
+
+
+## Spoken letters and codes
+
+Read a ticket reference out loud and most of it arrives intact — Parakeet spells
+letters into an acronym by itself. What it will not do is join the acronym to its
+number, which is exactly the part you would have to retype:
+
+| said | typed |
+| --- | --- |
+| assign E P M one one eight zero to me | `assign EPM-1180 to me` |
+| the ticket is E P M five four three two one | `the ticket is EPM-54321` |
+| I need the value of A B C one two three | `I need the value of ABC-123` |
+| look at C V E two zero two five one two three four five | `look at CVE-202512345` |
+| A B C | `ABC` |
+
+Letters are joined into one token and a following number is hyphenated onto them.
+Letters and digits *interleaved* become one sequence with no hyphen — *A twenty
+three B C two three four* is `A23BC234` — which is what a serial number or a
+machine name sounds like, and usually what the model wrote already.
+
+**Only capitals count**, which is what keeps this out of ordinary prose:
+*Windows 11*, *at 5 pm* and *a 12-month contract* are all untouched, because the
+model writes those words the way it heard them. A run of letters on its own needs
+**three** of them, since the model sometimes runs two sentences together
+(*"Grade A. B is worse."*); two is enough only when a number follows and
+corroborates them, so *P M nine one four nine* still gives `PM-9149`. Punctuation
+always ends a run, so *"the answer is A, B, or C"* and *"John F. Kennedy"* are
+safe.
+
+**What this does not do.** A lower-case acronym — the model writes *help* rather
+than *HELP* because it is an ordinary word, so a `help => HELP` line in your
+[vocabulary](#custom-vocabulary) is what makes `HELP-4567` work. Nor more than
+one hyphen, so `CVE-2025-12345` is out of reach. The trade-off it does make: an
+acronym conventionally written with a space gets a hyphen too, so *ISO 9001*
+becomes `ISO-9001`. There is no rule that tells that apart from a ticket, so set
+`letters_to_acronyms = false`, or untick **Settings… → Text → Letters**, to turn
+it off.
 
 
 ## Speed

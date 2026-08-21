@@ -16,6 +16,7 @@ from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
 from pywhispr import flavor, gpu
+from pywhispr.acronyms import is_acronym_substitution, to_acronyms
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import AudioRecorder, find_device
 from pywhispr.caret import ContextTracker
@@ -598,9 +599,9 @@ class PyWhisprApp(QObject):
 
         No continuation joining: that belongs to the local dictation cycle,
         which has a caret to join onto. A remote caller has neither that nor
-        any session. Filler removal, the vocabulary and spoken numbers do apply,
-        because they are standing preferences about the text rather than session
-        state.
+        any session. Filler removal, the vocabulary, spoken numbers and spoken
+        letters do apply, because they are standing preferences about the text
+        rather than session state.
 
         Plugins apply too, but only their rewrites — never their actions. This
         port is open to the LAN with no authentication (see ``config.api_host``),
@@ -611,7 +612,9 @@ class PyWhisprApp(QObject):
         text = self._worker.submit(self.backend.transcribe, audio).result(
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
-        corrected = self._numbered(self._corrected(self._cleaned(self._after_reset(text))))
+        corrected = self._acronyms(
+            self._numbered(self._corrected(self._cleaned(self._after_reset(text))))
+        )
         return self._via_plugins(corrected, collect_actions=False)
 
     # -- state transitions (main thread only) --------------------------------
@@ -879,12 +882,14 @@ class PyWhisprApp(QObject):
         log.info("Transcribed %d characters", len(text))
         self._set_state(State.INSERTING)
         self.overlay.hide_overlay()
-        # Vocabulary, then numbers, then plugins: each can change the opening
-        # word, and the join decides about whatever the last of them leaves
-        # there. Numbers after the vocabulary because an entry of the user's may
-        # spell a number word ("s three => S3"), and before the plugins so a
-        # trigger sees the finished digits.
-        corrected = self._via_plugins(self._numbered(self._corrected(text)))
+        # Vocabulary, then numbers, then acronyms, then plugins: each can change
+        # the opening word, and the join decides about whatever the last of them
+        # leaves there. Numbers after the vocabulary because an entry of the
+        # user's may spell a number word ("s three => S3"); acronyms after the
+        # numbers because a code's digits have to be digits before they can be
+        # hyphenated onto its letters; and all of them before the plugins so a
+        # trigger sees the finished text.
+        corrected = self._via_plugins(self._acronyms(self._numbered(self._corrected(text))))
         if not corrected.strip():
             # A dictation that was nothing but a command. There is no text to
             # paste and none worth remembering, but the action still runs.
@@ -991,6 +996,36 @@ class PyWhisprApp(QObject):
         if not is_digit_substitution(text, result):
             log.error(
                 "Numbers pass produced %d characters from %d that do not follow "
+                "from its %d span(s); using the transcript as it was",
+                len(result.text),
+                len(text),
+                len(result.spans),
+            )
+            return text
+        return result.text
+
+    def _acronyms(self, text: str) -> str:
+        """Join spoken letters and codes, degrading to the transcript untouched.
+
+        After the numbers pass, necessarily: "P M nine one four nine" only
+        becomes PM-9149 because the digits are already digits by the time this
+        runs. Ahead of it this pass would see number words, find no digit group
+        to hyphenate, and leave the code half-finished.
+
+        Wrapped like _numbered, and with the same kind of tripwire rather than
+        the vocabulary's length ratio — joining letters legitimately shortens
+        the text, so only a span proof can tell a conversion from a mangling.
+        """
+        if not text or not self.cfg.letters_to_acronyms:
+            return text
+        try:
+            result = to_acronyms(text)
+        except Exception:
+            log.exception("Acronym pass failed; using the transcript as it was")
+            return text
+        if not is_acronym_substitution(text, result):
+            log.error(
+                "Acronym pass produced %d characters from %d that do not follow "
                 "from its %d span(s); using the transcript as it was",
                 len(result.text),
                 len(text),

@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from pywhispr.acronyms import AcronymResult
+from pywhispr.acronyms import Replacement as AcronymSpan
 from pywhispr.app import PUSH_TO_TALK_HOLD_SECONDS, PyWhisprApp, State
 from pywhispr.config import Config
 from pywhispr.numbers import NumberResult, Replacement
@@ -410,6 +412,77 @@ class TestSpokenNumbers:
         app._test_backend.transcribe.return_value = "The port is nine one four nine."
         audio = np.zeros(16000, dtype=np.float32)
         assert app._api_transcribe(audio) == "The port is 9149."
+
+
+class TestSpokenLetters:
+    """Letters said one at a time, and a code, reach the paste joined up."""
+
+    def _dictate(self, app, qtbot, text):
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_hyphenates_a_code(self, app, qtbot):
+        """The whole point: the model writes the acronym, we add the hyphen."""
+        insert = self._dictate(app, qtbot, "Assign EPM 1180 to me please.")
+        insert.assert_called_once_with("Assign EPM-1180 to me please.", ())
+
+    def test_runs_after_the_numbers(self, app, qtbot):
+        """A code's digits have to be digits before they can be hyphenated on.
+
+        Said with pauses, so the letters arrive spaced and the number arrives as
+        words — only this ordering joins both halves.
+        """
+        insert = self._dictate(app, qtbot, "P M nine one four nine.")
+        insert.assert_called_once_with("PM-9149.", ())
+
+    def test_joins_a_run_of_letters(self, app, qtbot):
+        insert = self._dictate(app, qtbot, "Look at C V E now.")
+        insert.assert_called_once_with("Look at CVE now.", ())
+
+    def test_a_list_of_letters_is_left_alone(self, app, qtbot):
+        insert = self._dictate(app, qtbot, "Do you prefer option A, B, or C?")
+        insert.assert_called_once_with("Do you prefer option A, B, or C?", ())
+
+    def test_disabled_by_config(self, app, qtbot):
+        app.cfg.letters_to_acronyms = False
+        insert = self._dictate(app, qtbot, "Assign EPM 1180 to me please.")
+        insert.assert_called_once_with("Assign EPM 1180 to me please.", ())
+
+    def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot):
+        with patch("pywhispr.app.to_acronyms", side_effect=RuntimeError("boom")):
+            insert = self._dictate(app, qtbot, "Assign EPM 1180 to me please.")
+        insert.assert_called_once_with("Assign EPM 1180 to me please.", ())
+        assert app.state == State.INSERTING
+
+    def test_output_its_spans_do_not_account_for_is_rejected(self, app, qtbot):
+        broken = AcronymResult("Something else entirely.", ())
+        with patch("pywhispr.app.to_acronyms", return_value=broken):
+            insert = self._dictate(app, qtbot, "Assign EPM 1180 to me please.")
+        insert.assert_called_once_with("Assign EPM 1180 to me please.", ())
+
+    def test_a_span_that_did_more_than_close_a_gap_is_rejected(self, app, qtbot):
+        # The tripwire that matters: whatever the scanner does, it can only have
+        # taken the spacing out and put at most one hyphen in.
+        broken = AcronymResult("I have FIVE-APPLES", (AcronymSpan(7, 18, "FIVE-APPLES"),))
+        with patch("pywhispr.app.to_acronyms", return_value=broken):
+            insert = self._dictate(app, qtbot, "I have five apples")
+        insert.assert_called_once_with("I have five apples", ())
+
+    def test_the_vocabulary_still_sees_the_words(self, app, qtbot):
+        """Why this runs after the vocabulary: an entry may spell the acronym."""
+        app._vocab = parse_vocabulary("help => HELP")
+        insert = self._dictate(app, qtbot, "I filed it under help 4567.")
+        insert.assert_called_once_with("I filed it under HELP-4567.", ())
+
+    def test_the_api_gets_it_too(self, app):
+        app._test_backend.transcribe.return_value = "Assign EPM 1180 to me."
+        audio = np.zeros(16000, dtype=np.float32)
+        assert app._api_transcribe(audio) == "Assign EPM-1180 to me."
 
 
 class TestPlugins:

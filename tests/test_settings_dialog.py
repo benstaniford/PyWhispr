@@ -101,6 +101,12 @@ class TestSaving:
         dialog._numbers.setChecked(False)
         assert self._saved(dialog).numbers_to_digits is False
 
+    def test_the_letters_toggle_round_trips(self, build):
+        dialog = build(Config(letters_to_acronyms=True))
+        assert dialog._letters.isChecked()
+        dialog._letters.setChecked(False)
+        assert self._saved(dialog).letters_to_acronyms is False
+
     def test_reset_phrases_are_a_comma_separated_list(self, build):
         dialog = build()
         dialog._reset_phrases.setText("clear clear, scratch scratch ,")

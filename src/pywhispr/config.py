@@ -113,6 +113,11 @@ class Config:
     # five" -> 25. Only a run of two or more numbers is converted, so a lone
     # number word is left as a word ("one of the reasons"). See numbers.py.
     numbers_to_digits: bool = True
+    # Spoken letters joined into one token, and a code hyphenated: "E P M one one
+    # eight zero" -> EPM-1180, "A B C" -> ABC. Capitals only, so "Windows 11" and
+    # "at 5 pm" are left alone; a run of letters on its own needs three of them.
+    # See acronyms.py.
+    letters_to_acronyms: bool = True
     # Plugins: a phrase you say, and what happens when you say it (Settings… →
     # Advanced → Open folder…). plugins_enabled is the master switch;
     # plugin_actions_enabled leaves plugins able to rewrite text but stops them

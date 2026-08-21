@@ -293,6 +293,78 @@ corrected spellings.
   newline or a full stop keeps its sentence intact.
 - **Never log the transcript or the words matched** — span counts only.
 
+## Spoken letters and codes (`acronyms.py`)
+
+A dictated ticket reference. **Measured before it was designed**, and that is the
+whole reason it is small: Parakeet already spells letters into an acronym
+("E P M" → `EPM`, "B S" → `BS`) and already glues interleaved letters and digits
+("A twenty three B C two three four" → `A23BC234`), so *rule 3 needed no code at
+all* and the pass's job there is to leave it be. The gaps are the **hyphen**
+(`EPM 1180` → `EPM-1180`) and joining letters on the occasions the model leaves
+them spaced, which it does when they are said with pauses (`C V E`, `P M 9149`).
+Saying "dash" already works — this is about not having to.
+
+- **After `numbers.py`, and that is load-bearing.** "P M nine one four nine" only
+  reaches `PM-9149` because the digits are digits by then; ahead of the numbers
+  pass there is no digit group to hyphenate onto and the code comes out half
+  done. Before the plugins, like everything else, so a trigger sees finished text.
+- Scans *groups* — a run of capitals or a run of digits — separated by spacing or
+  nothing. Adjacent letter groups merge, leaving a strict alternation to decide
+  about: one letter group joins, letters-then-digits hyphenate, 3+ alternating
+  concatenate, **digits-then-letters is prose** ("at 5 PM").
+- **Capitals only, and that single rule does most of the work.** Spelled letters
+  arrive as capitals and ordinary words do not, which is the whole of what leaves
+  `Windows 11`, `at 5 pm`, `a 12-month contract` and `iOS 18` alone. Reading a
+  *capitalised* word as an acronym is the tempting extension and it is what would
+  turn "Windows 11" into "Windows-11".
+- **Two thresholds for a letter run**, the same shape as `numbers.py`'s two for
+  `oh`. A run on its own needs 3 single letters because **the model runs sentences
+  together** — "Grade A. B is worse." really does arrive as "Grade A B is worse.",
+  measured, so two letters are not evidence of a spelling. Two is enough only when
+  a digit run follows and corroborates them. `MIN_DIGITS = 2` is the same kind of
+  guard on the other side: it is what leaves "I sent it to IT 5 times" alone.
+- **Only spacing holds a run together, never punctuation.** That is what saves
+  "A, B, or C" and "John F. Kennedy" — the gap rule, not a word list — and it is
+  also what makes the pass idempotent for free, since `EPM-12345` re-read has a
+  hyphen where it would need spacing.
+- **A multi-letter group may only ever stand alone**: "The AB CD test" is two
+  acronyms with a space between them, not a sequence of letters.
+- **The tripwire is stronger than `numbers.py`'s**, and this is the one thing here
+  worth copying elsewhere. Beyond the span-ordering and re-splice proof, the
+  replacement must equal its own source with the spacing removed and at most one
+  hyphen inserted: `span.written.replace("-", "", 1) == "".join(source.split())`.
+  So however the scanner misbehaves it cannot lose, add or re-case a single
+  character. The input pattern admits no hyphen, which is what stops that
+  `replace` eating one the user dictated.
+- **`numbers._SPACES` does not contain the non-breaking space its comment claims**
+  — it is `" \t "`, space-tab-space; the reformat the comment warns about already
+  happened, and the literal reads identically either way, which is why nobody
+  noticed. `acronyms.py` writes `" \t\xa0"` as an **escape** for that reason, and
+  `tests/test_acronyms.py` asserts on `"\xa0"` the same way — a literal there
+  makes the test quietly vacuous instead of failing. `vocab._SEPARATOR` still has
+  the real character. Fixing `numbers.py` changes that pass's behaviour, so it was
+  left alone deliberately and is worth doing on its own.
+- **The trade taken knowingly:** `EPM 1180` → `EPM-1180` and `ISO 9001` →
+  `ISO-9001` are the *same shape*. "The numbers pass produced these digits" cannot
+  be the discriminator — measured, both of those arrive already digitised, so
+  whether the model writes the number itself is a coin toss. A built-in skip-list
+  would be a guessy blacklist that is never complete. So `letters_to_acronyms =
+  false` is the escape hatch and there is deliberately no second knob. Measured
+  cost on 1,261 lines of this repo's own acronym-dense prose: **3 lines**
+  (`RTX 50`, `CUDA 12`, `CUDA 13`).
+- Also knowingly out: a **lower-case acronym** needs a `help => HELP` vocabulary
+  line, because the model writes "help" as a word; a **pre-split digit run**
+  ("X Y Z 9 8 7") concatenates without a hyphen, since spaced numbers are
+  `numbers.py`'s job and are one group by the time this runs; and `CVE-2025-12345`
+  is unreachable, one hyphen being all the proof above permits.
+- **Never log the transcript or the words matched** — span counts only.
+- Testing gotcha: the probe harness that produced every number above is worth
+  rebuilding rather than reasoning about. `say -v Daniel --file-format=WAVE
+  --data-format=LEI16@16000 --channels=1 -o x.wav "..."` → `stt.wav.read_wav_mono_16k`
+  → `create_backend(Config())` gives real transcripts in seconds off the cached
+  model, and every guard in this section came from one contradicting a guess. TTS
+  articulates more cleanly than a person, so it flatters the letter-joining path.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing
