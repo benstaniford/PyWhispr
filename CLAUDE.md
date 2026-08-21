@@ -219,9 +219,12 @@ corrected spellings.
   five` is `1.25`. It is an ordinary English word, so the guard is the same shape as
   every other one here — structural, not a heuristic: **a number word on each side
   with nothing but spacing between** (`_fraction_follows`), which is what leaves
-  `the two point plan` and `one point I want to make` alone. One point per run: a
-  version string is not a decimal, so `one point two point three` converts as far as
-  `1.2`. Inside the fraction a comma or a **scale word ends the run** rather than
+  `the two point plan` and `one point I want to make` alone. **Repeating it is a
+  version number** and needs no separate path: the same guard applied per `point`
+  gives `zero point two point twenty six` → `0.2.26` and `one point two point three
+  point four` → `1.2.3.4`, while a sentence that merely says "point" twice fails the
+  guard at each one. Segments compose the ordinary way, so `twenty six` is one
+  segment. After the first point a comma or a **scale word ends the run** rather than
   joining it — `one point five million` is `1.5 million`, and folding the scale in
   would have emitted `1.5000000`, which is the shape this got wrong before decimals
   were handled at all (the fraction was converting *on its own*: `one point 25`).
@@ -275,8 +278,8 @@ corrected spellings.
   returns its **spans** and `is_digit_substitution` checks them — ordered,
   non-overlapping, digits out, nothing but number words in, and re-splicing
   reproduces the text. Whatever the parser does, it can only have replaced a number.
-  The decimal point widens both halves of that proof by exactly one step — the output
-  may carry one `.` with a digit either side, and `and`/`point` are allowed in the
+  The point widens both halves of that proof by exactly one step — the output may
+  carry `.`s, each with a digit on both sides, and `and`/`point` are allowed in the
   span only *between* two number words, never at an edge, so neither can be swallowed
   off the end of a run.
 - **The trade taken knowingly:** `twenty twenty` → `2020` and `thirty forty percent`
