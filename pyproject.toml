@@ -1,6 +1,6 @@
 [project]
 name = "pywhispr"
-version = "0.2.23"
+version = "0.2.24"
 description = "Local, hotkey-driven voice dictation using open source speech-to-text models"
 readme = "README.md"
 license = { file = "LICENSE" }
