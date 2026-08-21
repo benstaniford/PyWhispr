@@ -84,6 +84,17 @@ class TestStopTheRunningApp:
         assert "taskkill.exe" in target
         assert "PyWhispr.exe" in target
 
+    def test_every_source_is_a_directory_key_that_exists(self, data):
+        """The one that shipped broken: type 34's Source is a *Directory table key*,
+        not a property, and cx_Freeze authors that table from the build tree alone.
+        `SystemFolder` has no row, so the install died at error 2727, "the directory
+        entry does not exist in the Directory table". TARGETDIR is the only key we can
+        name; a system path belongs in the command line, where the installer formats
+        the property itself."""
+        for name, type_bits, source, _target in data["CustomAction"]:
+            if type_bits & 32:  # msidbCustomActionTypeDirectory
+                assert source == "TARGETDIR", name
+
     def test_graceful_first(self, data):
         """The graceful path restores the audio mixer levels, which Windows
         remembers per app and a killed process would leave turned down."""

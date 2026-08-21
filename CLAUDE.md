@@ -735,6 +735,12 @@ model loads.
 - A unix socket path is limited to ~104 bytes and `~/Library/Application
   Support/PyWhispr` already spends 68, so failing to bind is a logged warning and
   not a failure to start. The cost is a force-kill instead of a graceful one.
+- **A custom action's `Source` is a Directory *table key*, not a property.**
+  cx_Freeze authors that table from the build tree and nothing else, so `SystemFolder`
+  — which is a real property, formats correctly in a command line, and is the obvious
+  thing to name — has no row, and Windows Installer aborts the install with **error
+  2727**. v0.2.23 shipped that way. Both actions use `TARGETDIR`, the only key there
+  is, and the system path stays in the Target string where the installer resolves it.
 - **The MSI runs `PyWhispr.exe quit` before it touches a file, and then
   `taskkill`.** Two actions, and the order is the point — see `setup_msi.py`. The
   graceful one runs the *old* build's exe, and every build before this one exits 2

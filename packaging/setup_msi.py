@@ -86,6 +86,15 @@ msi_data = {
 # +64 is ...Continue: ignore the exit code, so neither of these can fail an
 # install.
 #
+# **Source must be TARGETDIR for both, because it is the only Directory key that
+# exists.** cx_Freeze authors the Directory table from the build tree and nothing
+# else, so `SystemFolder` — a perfectly good *property*, and the obvious thing to
+# put here — has no row, and Windows Installer fails the whole install with
+# **error 2727, "the directory entry does not exist in the Directory table"**. That
+# is what v0.2.23 shipped. `[SystemFolder]` is still right in the *command line*:
+# Target is a formatted string and the installer sets that property itself during
+# initialisation, and if it ever did not, taskkill.exe is on the PATH anyway.
+#
 # Both run at 1398/1399: after CostFinalize (1000) has resolved [TARGETDIR] —
 # before that it would format to nothing — and before InstallValidate (1400)
 # computes files-in-use and cx_Freeze's forced RemoveExistingProducts (1450).
@@ -109,7 +118,7 @@ STOP_CONDITION = "REMOVEOLDVERSION OR REMOVENEWVERSION OR Installed"
 TASKKILL = '"[SystemFolder]taskkill.exe" /F /IM PyWhispr.exe'
 msi_data["CustomAction"] = [
     (STOP_ACTION, 34 + 64, "TARGETDIR", '"[TARGETDIR]PyWhispr.exe" quit'),
-    (FORCE_STOP_ACTION, 34 + 64, "SystemFolder", TASKKILL),
+    (FORCE_STOP_ACTION, 34 + 64, "TARGETDIR", TASKKILL),
 ]
 msi_data["InstallExecuteSequence"] = [
     (STOP_ACTION, STOP_CONDITION, 1398),
