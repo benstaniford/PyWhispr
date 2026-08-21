@@ -15,7 +15,8 @@ Two mechanisms, and the split between them is the whole design:
 "point" is neither: it is a *separator*, like a comma, that puts a decimal point
 in the output. Both mechanisms then apply either side of it, which is what makes
 "twenty six point two" and "two six point two" both 26.2, and "one point two
-five" 1.25.
+five" 1.25. A run may carry more than one, so "zero point two point twenty six"
+is 0.2.26 — a version number is the same separator repeated.
 
 A **lone** number word is never touched. That is the false-trigger guard, and it
 is structural rather than a heuristic, the same way ``scratch.py``'s doubled
@@ -127,9 +128,9 @@ _ONLY_NUMBER_WORDS = re.compile(
     rf"(?:{_ANY_GAP}(?:(?:{_ANY_INFIX_WORD}){_ANY_GAP})?(?:{_ANY_NUMBER_WORD}))*",
     re.IGNORECASE,
 )
-# What a replacement is allowed to be: digits, with at most one decimal point
-# and a digit either side of it.
-_DIGIT_OUTPUT = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# What a replacement is allowed to be: digits, separated by points, with a digit
+# on both sides of every one — so no point can sit at an edge of the output.
+_DIGIT_OUTPUT = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 
 
 @dataclass(frozen=True)
@@ -299,14 +300,18 @@ class _Run:
     words: int  # number words consumed; the infix words do not count
     last: int  # index of the last token consumed
     punctuated: bool  # was any group boundary a comma or a dash?
-    point_at: int | None = None  # the group the decimal point sits in front of
+    points: tuple[int, ...] = ()  # the groups a point sits in front of, in order
 
     @property
     def digits(self) -> str:
         parts = [str(value) for value in self.groups]
-        if self.point_at is None:
-            return "".join(parts)
-        return f"{''.join(parts[: self.point_at])}.{''.join(parts[self.point_at :])}"
+        segments = []
+        previous = 0
+        for point in self.points:
+            segments.append("".join(parts[previous:point]))
+            previous = point
+        segments.append("".join(parts[previous:]))
+        return ".".join(segments)
 
 
 def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
@@ -323,9 +328,10 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     * An **"and" is only ever pending**: it is absorbed once the word after it
       extends the group, and otherwise the run ends in front of it. So a
       conjunction can never widen a span it did not earn.
-    * A **"point"** closes the group and marks where the decimal point goes,
-      but only once, only between two number words (see _fraction_follows) and
-      only where no comma has already broken the run. Inside the fraction a
+    * A **"point"** closes the group and marks where a point goes, but only
+      between two number words (see _fraction_follows) and only where no comma
+      has already broken the run. Repeating it is how a version number is said,
+      so "zero point two point twenty six" is 0.2.26. After the first one a
       comma or a scale word ends the run rather than joining it, which is what
       leaves "one point five million" as 1.5 million instead of 1.5000000.
     """
@@ -335,7 +341,7 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     last = -1
     punctuated = False
     pending_and = False
-    point_at: int | None = None
+    points: list[int] = []
     # Where to rewind to if a scale word later proves the absorbed "and" was a
     # conjunction: the groups, value and word count as they were in front of it.
     rewind: tuple[int, int, int] | None = None
@@ -349,18 +355,18 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     for index in range(start, end):
         token = tokens[index]
         word = token.word
-        if point_at is not None and (token.link == _PUNCTUATED or _is_scale(word)):
+        if points and (token.link == _PUNCTUATED or _is_scale(word)):
             # A fraction is a digit sequence and nothing else: the scale belongs
             # to the number as a whole ("one point five million"), and a comma
             # after the fraction is the sentence's, not the number's.
             break
         if word == POINT:
-            if pending_and or punctuated or point_at is not None or token.link != _PLAIN:
+            if pending_and or punctuated or token.link != _PLAIN:
                 break
             if not _fraction_follows(tokens, index, end):
                 break
             close()
-            point_at = len(groups)
+            points.append(len(groups))
             rewind = None
             continue
         if word == CONJUNCTION:
@@ -411,7 +417,7 @@ def _scan(tokens: list[_Token], start: int, end: int) -> _Run | None:
     close()
     if not groups or last < start:
         return None
-    return _Run(groups, words, last, punctuated, point_at)
+    return _Run(groups, words, last, punctuated, tuple(points))
 
 
 def _fraction_follows(tokens: list[_Token], index: int, end: int) -> bool:
@@ -452,8 +458,10 @@ def _convertible(run: _Run, tokens: list[_Token], start: int) -> bool:
     """
     if run.words < MIN_RUN_WORDS:
         return False  # one number word is not a number sequence
-    if run.point_at is not None and not 0 < run.point_at < len(run.groups):
-        return False  # a decimal point with nothing on one side of it
+    if any(not 0 < point < len(run.groups) for point in run.points):
+        return False  # a point with nothing on one side of it
+    if len(set(run.points)) != len(run.points):
+        return False  # two points with no group between them
     single_digits = all(0 <= value <= 9 for value in run.groups)
     if run.punctuated and (len(run.groups) < MIN_PUNCTUATED_GROUPS or not single_digits):
         return False

@@ -139,11 +139,63 @@ class TestDecimalPoint:
             ("twenty six, point two", "26, point two"),
             # Inside the fraction, a comma is the sentence's too.
             ("one point two, three of them", "1.2, three of them"),
-            # One decimal point per number: a version string is not a decimal.
-            ("version one point two point three", "version 1.2 point three"),
+            # The scale ends the run wherever it lands, including after a second
+            # point.
+            ("one point two point five million", "1.2.5 million"),
         ],
     )
     def test_reaches_only_as_far_as_the_fraction(self, said, wanted):
+        assert digits(said) == wanted
+
+
+class TestVersionNumbers:
+    """A version number is the same separator repeated; nothing else is new."""
+
+    @pytest.mark.parametrize(
+        ("said", "wanted"),
+        [
+            ("zero point two point twenty six", "0.2.26"),
+            # A compound segment is one group, so "twenty six" is 26, not 2.6.
+            ("one point nine point fifteen", "1.9.15"),
+            ("version zero point two point twenty six", "version 0.2.26"),
+            # Not hard-coded to three.
+            ("one point two point three point four", "1.2.3.4"),
+            ("one point two point three point four point five", "1.2.3.4.5"),
+            # Digit-by-digit segments still concatenate within a segment.
+            ("one point two six point one", "1.26.1"),
+            ("one hundred and eighty point two point one", "180.2.1"),
+        ],
+    )
+    def test_converts(self, said, wanted):
+        assert digits(said) == wanted
+
+    @pytest.mark.parametrize(
+        "said",
+        [
+            # A sentence that merely says "point" twice is not a version number:
+            # each one still needs a number word on both sides of it, with
+            # nothing but spacing between.
+            "I made my point. Three things matter",
+            "that is a fair point and my second point is worse",
+            "the two point plan and the three point plan",
+            "on point two of the agenda, on point three of the agenda",
+            "one point I want to make, and the point three others made",
+        ],
+    )
+    def test_prose_is_untouched(self, said):
+        assert digits(said) == said
+
+    @pytest.mark.parametrize(
+        ("said", "wanted"),
+        [
+            # A trailing "point" is left where the model put it, however many
+            # came before it.
+            ("one point two point three point", "1.2.3 point"),
+            # A leading "point" cannot begin a run, so the run starts at "two".
+            ("point two point three", "point 2.3"),
+        ],
+    )
+    def test_edges(self, said, wanted):
         assert digits(said) == wanted
 
 
@@ -321,7 +373,7 @@ class TestTheTripwire:
         claimed = NumberResult("twelve", (Replacement(0, 7, "twelve"),))
         assert not is_digit_substitution(said, claimed)
 
-    @pytest.mark.parametrize("digits_out", ["1.", ".5", "1.2.3", "1,2"])
+    @pytest.mark.parametrize("digits_out", ["1.", ".5", "1..2", "1.2.", "1,2"])
     def test_rejects_a_replacement_that_is_not_one_number(self, digits_out):
         said = "twenty six point two"
         claimed = NumberResult(digits_out, (Replacement(0, len(said), digits_out),))
@@ -347,6 +399,7 @@ class TestTheTripwire:
             ("one hundred and eighty", True),
             ("seven-three-two", True),
             ("two point five", True),
+            ("one point two point three", True),
             ("one apple", False),
             ("one. two", False),
             # An infix word may only sit between two numbers, never at an edge.
@@ -369,6 +422,8 @@ class TestIdempotence:
             "I have five apples",
             "twenty six point two",
             "one point five million",
+            "zero point two point twenty six",
+            "I made my point. Three things matter",
         ],
     )
     def test_a_second_pass_changes_nothing(self, said):
