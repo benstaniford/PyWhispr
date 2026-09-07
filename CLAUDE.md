@@ -646,6 +646,126 @@ opening word that join then decides about.
   Diagnosing this needs `PYTHONUNBUFFERED=1` (a `>` redirect block-buffers, so the
   reported test is thousands of lines stale) plus `-o faulthandler_timeout=25` for
   the thread dump.
+- Testing gotcha: **`isolated_app` keeps every app it builds for the whole
+  session, and that is load-bearing.** Freeing one at teardown is what made the
+  suite **segfault** (`Bus error`/`Segmentation fault`) in `test_full_cycle` — a
+  test that touches none of this. A test may end with work in flight (the
+  push-to-talk ones stop mid-transcription deliberately); `_transcribed` is a
+  *queued* signal, and delivering it in turn starts the injector's paste timers.
+  Free the app while any of that is still addressed to it, and the next test to
+  pump the event queue has Qt deliver into freed memory. Draining the worker is
+  **not** enough — the event queue outlives it, and neither `processEvents()` at
+  teardown nor a `wait_for_worker` in the offending test fixed it. Same family as
+  the two gotchas above: it presents as a *new* crash in innocent code, it is
+  exquisitely sensitive to timing (adding any one test to `TestAudioDucking`
+  triggered it, an emptied test body triggered it, and pristine code at the same
+  test count did not), and the way to prove it is to hold a reference to every app
+  and watch it vanish. Bisect such a crash by *file selection* — the four-file set
+  `test_acronyms test_api test_app test_audio` reproduced it 5/5 while the full
+  suite was ~80% — and note the crash follows whichever test runs *after* the one
+  that leaked, so `--deselect` moves it rather than fixing it.
+
+## Ducking other audio (`ducking.py` + `coreaudio.py`)
+
+Windows turns each other application down individually (`ISimpleAudioVolume`, via
+pycaw). macOS **cannot**, and that asymmetry is the whole design: it dips the
+default output device instead, so the setting means "the room goes quiet" on both
+platforms and "every other app keeps its place in the mix" on only one.
+
+- **There is no per-process output volume on macOS, and this was checked rather
+  than assumed.** Core Audio's process object (`kAudioProcessClassID`) carries a
+  pid, a bundle id, its devices and three read-only `IsRunning*` flags — nothing
+  writable — and every symbol in `AVAudioSession.h`, ducking option included, is
+  `API_UNAVAILABLE(macos)`. The old docstring's "macOS has no public per-app
+  volume API" was right; its conclusion that nothing could be done was not.
+- **`'vmvc'` is the single right selector**
+  (`kAudioHardwareServiceDeviceProperty_VirtualMainVolume`, output scope, element
+  0). It covers a device's whole output and keeps its channels in balance by
+  definition. Measured on this machine: it is present *and settable* on every real
+  playback device — the USB dock, the built-in speakers, BlackHole, Teams' virtual
+  device — and absent on a Multi-Output Device, which answers `'who?'`
+  (`kAudioHardwareUnknownPropertyError`). HDMI and many external DACs are the same:
+  the hardware owns the volume. **An empty control list is an ordinary answer, not
+  a failure.**
+- **Per-channel `'volm'` is a fallback and element 0 and channels 1..N are
+  alternatives, never both** — element 0 is the device's own control, so scaling it
+  *and* its channels would square the dip. Every rung is gated on
+  `AudioObjectHasProperty` **and** `AudioObjectIsPropertySettable`, because a
+  device can report a volume it will not let you change. Note the channel rung is
+  covered by tests but was never reached on this hardware: `'vmvc'` won every time.
+- **`restore()` uses the controls it saved and never re-reads the default
+  output.** That is the load-bearing invariant: it makes switching outputs
+  mid-recording harmless (the device that was dipped is the device put back) and
+  is why there is no `'dOut'` change listener — that would need a `CFUNCTYPE` proc
+  delivered on a Core Audio thread mutating `_saved` under no lock, for a window
+  measured in seconds. Device ids are ephemeral, incidentally: a reboot moved the
+  default output from 136 to 118.
+- **The device rounds what you write; restore is still exact.** Writing
+  0.16066420 read back 0.16094071 — the value goes through the hardware's volume
+  curve. Hence saving the level that was *read* rather than one computed from it:
+  writing that same float back is exact, because the device chose it.
+- **`cue_lead_ms` exists because the dip covers our own cues.** Windows keeps its
+  start and stop sounds audible by skipping its own pid; a system-wide dip has no
+  such escape hatch, and at the default `duck_volume = 0.0` the start cue would be
+  silent while the stop cue (after restore) played normally. So `app.py` plays the
+  cue and defers the dip, and `_duck_now`'s guard — still RECORDING, not
+  `_quitting` — is the whole safety net, since a push-to-talk tap restores before
+  the lead expires and `_quit` never changes the state. Windows keeps
+  `cue_lead_ms = 0` and ducks inline, exactly as before.
+- `QTimer.singleShot(ms, self, self._duck_now)`, **not a member `QTimer`**: bound
+  like this, Qt drops the pending call when the app goes, and there is no
+  permanent connection holding the app in a reference cycle.
+- **The crash caveat is the accepted trade, and it is worse on macOS than on
+  Windows** in scope: a `SIGKILL`, a native crash or a `SIGTERM` while ducked
+  leaves the *machine* quiet, not just the other apps. Every ordinary path out of
+  RECORDING restores, including quit. Deliberately no recovery machinery: a state
+  file restoring "the level from before the duck" at next launch would override a
+  volume the user has already fixed by hand, which is a worse bug than the one it
+  fixes, and an `atexit`/`aboutToQuit` hook only catches the orderly exits the
+  `finally` blocks already cover. The pre-duck level is logged at **INFO** instead
+  — the one log line here above debug — so the number to put back is on record.
+- `_apply_settings` **restores before it swaps the ducker**: one thrown away while
+  holding saved levels never gives them back. Unreachable today (no dialog can be
+  open during a recording) and one idempotent line to keep it that way.
+- **The settings label differs per platform**, from `ducking.system_wide()`.
+  "Quieten other applications" is a promise macOS cannot keep, and someone who
+  ticked it expecting per-app behaviour would instead hear their whole machine go
+  down mid-call. `supported()`/`system_wide()` take `platform: str | None`, **not**
+  a `= sys.platform` default — that binds at import and would quietly defeat the
+  `monkeypatch.setattr(sys, "platform", ...)` idiom the tests are built on.
+- **ctypes, not `pyobjc-framework-CoreAudio`**: that package is not installed
+  (pyobjc is only a transitive dep of pynput), upstream's own API notes disclaim
+  that the framework works correctly from Python, and it would need a PyInstaller
+  `hiddenimports` entry. A framework reached through `ctypes.util.find_library`
+  needs **no spec change at all**, because nothing is bundled — it is part of the
+  OS, the same way `platform_setup.py` reaches `AXIsProcessTrusted`. `_lib()` is
+  lazy, so `coreaudio.py` imports harmlessly on Windows and its tests run there.
+- Also rejected: `osascript -e "set volume output volume N"` (1% granularity,
+  ~150ms of subprocess start-up per call, no device targeting, and it fails
+  *silently* on exactly the devices that have no settable volume, turning an
+  honest log line into a mystery — and `osascript` is pathologically slow on this
+  MDM-managed machine anyway); and `kAudioDevicePropertyMute`, which would throw
+  away the "fraction of the current level" semantics.
+- **A per-app mute via audio taps was rejected.** macOS 14.2+ can hard-mute a
+  process with `CATapDescription.muteBehavior = CATapMuted` +
+  `AudioHardwareCreateProcessTap`, the only per-application control Apple ships.
+  Three reasons it cannot be this feature: it is a mute, not an attenuation, so
+  `duck_volume` would have no meaning; it is TCC-gated behind **Screen & System
+  Audio Recording** with no public API to check the grant, so a denial is
+  indistinguishable from a working duck that does nothing; and TCC keys off a
+  stable code-signing identity while our bundle is ad-hoc signed, so the grant
+  would not survive a rebuild. Everything that *does* per-app volume on macOS
+  (Background Music, eqMac, SoundSource) ships an `AudioServerPlugIn` and re-points
+  the default output device — weeks of C++, an admin installer, out of scope.
+- Testing gotcha: **`get_controls=` is the seam, exactly parallel to
+  `get_sessions=`**, and no test in `tests/test_ducking.py` may call `duck()` on a
+  ducker built without it, or the suite would move the developer's own volume. One
+  test pins the default wiring by identity (`_get_controls is
+  coreaudio.output_volume_controls`) without calling it.
+- Testing gotcha: **a `MagicMock` ducker needs `cue_lead_ms=` set explicitly.**
+  `QTimer.singleShot` will not take a mock, and it raises inside
+  `_start_recording` rather than at the ducking assertion, so the failure reads as
+  unrelated to ducking.
 
 ## GPU acceleration (`gpu.py` + `cuda.py` + `directml.py`)
 

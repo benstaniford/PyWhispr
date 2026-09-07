@@ -1,9 +1,20 @@
+# Nothing here may touch the real machine: every ducker is built with its
+# injection seam (get_sessions= / get_controls=) supplying fakes, so no test
+# enumerates a real audio session or moves a real volume.
 import sys
 
 import pytest
 
+from pywhispr import coreaudio
 from pywhispr.config import Config
-from pywhispr.ducking import NoOpDucker, SessionDucker, create_ducker
+from pywhispr.ducking import (
+    NoOpDucker,
+    OutputVolumeDucker,
+    SessionDucker,
+    create_ducker,
+    supported,
+    system_wide,
+)
 
 OWN_PID = 4242
 
@@ -134,6 +145,163 @@ class TestCreateDucker:
         assert isinstance(d, SessionDucker)
         assert d._level == pytest.approx(0.3)
 
-    def test_enabled_elsewhere_gives_noop(self, monkeypatch):
+    def test_enabled_on_macos_gives_output_volume_ducker(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "darwin")
+        d = create_ducker(Config(duck_other_audio=True, duck_volume=0.3))
+        assert isinstance(d, OutputVolumeDucker)
+        assert d._level == pytest.approx(0.3)
+        assert d.cue_lead_ms > 0  # the start cue is inside a system-wide dip
+
+    def test_enabled_elsewhere_gives_noop(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
         assert isinstance(create_ducker(Config(duck_other_audio=True)), NoOpDucker)
+
+
+class FakeControl:
+    def __init__(self, level: float):
+        self.level = level
+        self.sets = 0
+
+    def get(self) -> float:
+        return self.level
+
+    def set(self, value: float) -> None:
+        self.sets += 1
+        self.level = value
+
+
+def mac_ducker(controls, level=0.25):
+    return OutputVolumeDucker(level, get_controls=lambda: controls)
+
+
+class TestOutputVolumeDuckAndRestore:
+    def test_duck_scales_the_device_relative_to_its_own_level(self):
+        control = FakeControl(0.8)
+        mac_ducker([control]).duck()
+        assert control.level == pytest.approx(0.2)
+
+    def test_restore_puts_back_the_exact_original(self):
+        # The real thing reads a Float32, so the value has noise in it; ducking
+        # must return that value, not a rounded-off version of it.
+        original = 0.7720596790313721
+        control = FakeControl(original)
+        d = mac_ducker([control])
+        d.duck()
+        d.restore()
+        assert control.level == original
+
+    def test_per_channel_controls_keep_their_balance(self):
+        controls = [FakeControl(0.8), FakeControl(0.4), FakeControl(0.6)]
+        d = mac_ducker(controls)
+        d.duck()
+        assert [c.level for c in controls] == pytest.approx([0.2, 0.1, 0.15])
+        d.restore()
+        assert [c.level for c in controls] == pytest.approx([0.8, 0.4, 0.6])
+
+    def test_ducking_twice_does_not_compound(self):
+        control = FakeControl(0.8)
+        d = mac_ducker([control])
+        d.duck()
+        d.duck()
+        assert control.level == pytest.approx(0.2)
+        d.restore()
+        assert control.level == pytest.approx(0.8)
+
+    def test_restore_without_duck_touches_nothing(self):
+        control = FakeControl(0.8)
+        mac_ducker([control]).restore()
+        assert control.sets == 0
+        assert control.level == pytest.approx(0.8)
+
+    def test_level_is_clamped_both_ends(self):
+        assert OutputVolumeDucker(-3.0)._level == 0.0
+        assert OutputVolumeDucker(5.0)._level == 1.0
+
+    def test_default_volume_silences_the_machine_and_still_restores(self):
+        # The default config: duck_volume 0.0 mutes the Mac for the recording.
+        control = FakeControl(0.8)
+        d = mac_ducker([control], level=0.0)
+        d.duck()
+        assert control.level == 0.0
+        d.restore()
+        assert control.level == pytest.approx(0.8)
+
+    def test_the_default_seam_is_coreaudio(self):
+        # Pins the wiring without calling it, which would move a real volume.
+        assert OutputVolumeDucker(0.2)._get_controls is coreaudio.output_volume_controls
+
+
+class TestOutputVolumeFailureIsQuietlyPartial:
+    def test_failing_lookup_does_not_stop_the_recording(self):
+        def boom():
+            raise OSError("no default output device")
+
+        OutputVolumeDucker(0.25, get_controls=boom).duck()  # must not raise
+
+    def test_a_device_with_no_settable_volume_is_not_an_error(self):
+        # An aggregate or Multi-Output device, HDMI, some external DACs.
+        d = mac_ducker([])
+        d.duck()
+        assert d._saved == []
+        d.restore()  # must not raise
+
+    def test_one_bad_control_does_not_stop_the_others(self):
+        class BadControl(FakeControl):
+            def get(self) -> float:
+                raise OSError("the device went away")
+
+        alive = FakeControl(0.8)
+        d = mac_ducker([BadControl(0.4), alive])
+        d.duck()
+        assert alive.level == pytest.approx(0.2)
+        d.restore()
+        assert alive.level == pytest.approx(0.8)
+
+    def test_a_control_dying_on_restore_still_clears_the_saved_state(self):
+        class DiesOnRestore(FakeControl):
+            def set(self, value: float) -> None:
+                super().set(value)
+                if self.sets > 1:
+                    raise OSError("the device went away")
+
+        alive = FakeControl(0.8)
+        d = mac_ducker([DiesOnRestore(0.4), alive])
+        d.duck()
+        d.restore()
+        assert alive.level == pytest.approx(0.8)
+        assert d._saved == []
+
+
+class TestPlatformPredicates:
+    @pytest.mark.parametrize(
+        ("platform", "can_duck", "whole_machine"),
+        [("win32", True, False), ("darwin", True, True), ("linux", False, False)],
+    )
+    def test_predicates_by_platform(self, platform, can_duck, whole_machine):
+        assert supported(platform) is can_duck
+        assert system_wide(platform) is whole_machine
+
+    @pytest.mark.parametrize(
+        ("platform", "can_duck", "whole_machine"),
+        [("win32", True, False), ("darwin", True, True), ("linux", False, False)],
+    )
+    def test_predicates_read_sys_platform_at_call_time(
+        self, monkeypatch, platform, can_duck, whole_machine
+    ):
+        # The form that would break if either grew a `= sys.platform` default,
+        # which binds at import and is the idiom the rest of this file relies on.
+        monkeypatch.setattr(sys, "platform", platform)
+        assert supported() is can_duck
+        assert system_wide() is whole_machine
+
+
+class TestCoreAudioHelpers:
+    # Pure functions only: the rest of coreaudio.py is unmockable OS calls, which
+    # is why it has no test file of its own. These two run on every platform.
+    def test_fourcc_matches_the_documented_selector(self):
+        assert coreaudio._fourcc("vmvc") == 1986885219
+        assert coreaudio._fourcc("dOut") == 1682929012
+
+    def test_status_text_names_the_error_the_way_the_headers_do(self):
+        assert "who?" in coreaudio.status_text(0x77686F3F)
+        assert "0x77686f3f" in coreaudio.status_text(0x77686F3F)

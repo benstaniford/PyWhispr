@@ -179,3 +179,25 @@ class TestLiteBuild:
         with patch.object(dialog, "accept"):
             dialog._save()
         assert dialog.config.server_url == "http://other:9149"
+
+
+class TestDuckingRow:
+    """The row means something different per platform, so it says so."""
+
+    def test_macos_offers_it_and_says_it_is_the_system_volume(self, build, monkeypatch):
+        monkeypatch.setattr("pywhispr.ui.settings_dialog.sys.platform", "darwin")
+        dialog = build()
+        assert dialog._duck.isEnabled()
+        assert "system volume" in dialog._duck.text()
+
+    def test_windows_offers_it_as_per_application(self, build, monkeypatch):
+        monkeypatch.setattr("pywhispr.ui.settings_dialog.sys.platform", "win32")
+        dialog = build()
+        assert dialog._duck.isEnabled()
+        assert "other applications" in dialog._duck.text()
+
+    def test_elsewhere_it_is_disabled(self, build, monkeypatch):
+        monkeypatch.setattr("pywhispr.ui.settings_dialog.sys.platform", "linux")
+        dialog = build()
+        assert not dialog._duck.isEnabled()
+        assert dialog._duck.toolTip() == "Windows and macOS only"

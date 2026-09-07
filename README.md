@@ -72,7 +72,7 @@ this. (On Windows, double-tap works without any special permission.)
 Tray menu → **Settings…**. Three tabs:
 
 - **Dictation** — the hotkey, the start-over hotkey, the microphone, the
-  auto-stop guard, start/stop sounds, and ducking other applications.
+  auto-stop guard, start/stop sounds, and ducking other audio.
 - **Text** — filler removal, continuation joining, the custom vocabulary (and its
   editor), spoken numbers as digits, spoken letters joined into codes, and the
   spoken start-over phrases.
@@ -108,8 +108,8 @@ the rest are typed once and left alone, which is why they are not on it.
 | `use_gpu` | `true` | Windows/Linux only: `false` stops GPU acceleration being used without deleting its libraries — **Settings… → Advanced → GPU acceleration → Disable…** sets it. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
-| `duck_other_audio` | `false` | Windows only: turn other applications' audio down while recording and put it back when the recording stops |
-| `duck_volume` | `0.0` | How loud other applications stay while ducked, as a 0–1 fraction of their current volume — the default silences them; `0.2` keeps them at 20% |
+| `duck_other_audio` | `false` | Turn other audio down while recording and put it back when the recording stops. Windows turns each other application down on its own; macOS has no per-application volume, so the **system output volume** is dipped instead and the whole Mac goes quiet for the length of the recording. Not available on Linux. See [Ducking other audio](#ducking-other-audio) |
+| `duck_volume` | `0.0` | How loud audio stays while ducked, as a 0–1 fraction of its current volume — the default silences it; `0.2` keeps it at 20%. On macOS that is the system output volume, so the default mutes the Mac while recording |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
 | `clipboard_restore_delay_ms` | `300` | Wait before restoring your old clipboard |
 | `join_continuations` | `true` | Add the missing space when you dictate again straight after a previous dictation — see [Continuation joining](#continuation-joining) |
@@ -150,6 +150,32 @@ no keyboard shortcut.
 
 The transcripts are **never written to disk** — they live in memory, capped at ten,
 and go when the app does.
+
+## Ducking other audio
+
+A recording is easier to make in a quiet room, so **Settings… → Dictation → turn
+other audio down** dips whatever is playing while you dictate and puts it back
+when the recording stops. `duck_volume` says how far: the default `0.0` silences,
+`0.2` keeps things at 20% of wherever they were.
+
+It works differently on the two platforms, because only one of them offers a
+choice:
+
+- **Windows** turns each *other* application down on its own, through Core
+  Audio's per-application session volume. PyWhispr's own cues stay audible, and
+  every app keeps its place in the mix.
+- **macOS has no per-application volume at all** — nothing in Core Audio exposes
+  one, and `AVAudioSession`'s ducking option is iOS-only. So the **default output
+  device** is dipped instead: the whole Mac goes quiet for the length of the
+  recording. The start cue is played first and the dip follows it, or at the
+  default `duck_volume` you would never hear the recording begin.
+
+Two things to know on macOS. **Some outputs cannot be ducked**: an aggregate or
+Multi-Output device has no volume of its own, and neither do HDMI and many
+external DACs — dictation carries on as normal and the log says so. And **a hard
+kill while ducked leaves the volume down**, since nothing runs to put it back;
+every ordinary exit restores, including quitting mid-recording, and the log
+records the level to return to. The volume keys fix it.
 
 ## Continuation joining
 

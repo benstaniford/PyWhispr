@@ -806,7 +806,17 @@ class PyWhisprApp(QObject):
             self.tray.notify("Microphone error", str(exc))
             return
         self._set_state(State.RECORDING)
-        self.ducker.duck()
+        if self.ducker.cue_lead_ms:
+            # Only macOS needs the wait, and it gets a singleShot bound to self
+            # rather than a timer of our own: a member QTimer connected to a
+            # bound method puts the app in a reference cycle, and an app that
+            # only the cyclic collector can free gets freed while Qt is
+            # delivering events. Bound like this, Qt drops the pending call when
+            # the app goes. Where the dip cannot reach our own cues (Windows,
+            # and no ducking at all), this stays exactly where it always was.
+            QTimer.singleShot(self.ducker.cue_lead_ms, self, self._duck_now)
+        else:
+            self.ducker.duck()
         self.overlay.show_recording()
         self.tray.set_status("Recording…", active=True)
         self._max_duration_timer.start()
@@ -865,6 +875,14 @@ class PyWhisprApp(QObject):
     def _back_to_recording_overlay(self) -> None:
         if self.state == State.RECORDING:
             self.overlay.show_recording()
+
+    def _duck_now(self) -> None:
+        # The guard is the whole safety net, not a belt on top of one: a
+        # recording shorter than cue_lead_ms (a push-to-talk tap) has already
+        # restored by now, and _quit leaves the state alone, so an unguarded dip
+        # here would never be put back.
+        if self.state == State.RECORDING and not self._quitting:
+            self.ducker.duck()
 
     def _on_max_duration(self) -> None:
         if self.state == State.RECORDING:
@@ -1284,6 +1302,9 @@ class PyWhisprApp(QObject):
             self._register_reset_hotkey(new.reset_hotkey)
         self._fillers = filler_words(new.extra_filler_words, new.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(new.voice_reset_phrases)
+        # Restore first: a ducker thrown away while holding saved levels never
+        # gives them back, which on macOS means a permanently quiet Mac.
+        self.ducker.restore()
         self.ducker = create_ducker(new)
         self._max_duration_timer.setInterval(new.max_recording_seconds * 1000)
         if new.input_device_name != old.input_device_name:

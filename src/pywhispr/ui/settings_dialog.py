@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pywhispr import flavor
+from pywhispr import ducking, flavor
 from pywhispr.audio import all_input_devices, display_name, input_devices
 from pywhispr.config import Config
 
@@ -155,10 +155,26 @@ class SettingsDialog(QDialog):
         self._play_sounds = self._check("Play a sound when recording starts and stops", "play_sounds")
         form.addRow("", self._play_sounds)
 
-        self._duck = self._check("Quieten other applications while recording", "duck_other_audio")
-        self._duck.setEnabled(sys.platform == "win32")
-        if sys.platform != "win32":
-            self._duck.setToolTip("Windows only")
+        # The label differs by platform because the behaviour does: "quieten other
+        # applications" is a promise macOS cannot keep, having no per-application
+        # volume, and someone who ticked it expecting one would instead hear their
+        # whole machine go down mid-call.
+        system_wide = ducking.system_wide(sys.platform)
+        self._duck = self._check(
+            "Turn the system volume down while recording"
+            if system_wide
+            else "Quieten other applications while recording",
+            "duck_other_audio",
+        )
+        self._duck.setEnabled(ducking.supported(sys.platform))
+        if system_wide:
+            self._duck.setToolTip(
+                "macOS has no per-application volume, so the whole output device is "
+                "turned down and put back when the recording stops. duck_volume in "
+                "the config file sets how far."
+            )
+        elif not self._duck.isEnabled():
+            self._duck.setToolTip("Windows and macOS only")
         form.addRow("", self._duck)
         return page
 

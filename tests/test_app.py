@@ -16,6 +16,10 @@ from pywhispr.plugins.engine import Plugin, compile_patterns
 from pywhispr.scratch import compile_reset_phrases
 from pywhispr.vocab import parse_vocabulary
 
+# Every app the suite builds, kept for the rest of the session — see the comment
+# where they are added, at the bottom of isolated_app.
+_SESSION_APPS: list = []
+
 
 @contextlib.contextmanager
 def isolated_app(**config_kwargs):
@@ -63,6 +67,19 @@ def isolated_app(**config_kwargs):
             yield instance, tray_cls
         finally:
             instance._worker.shutdown(wait=True)
+            # And then the app is kept for the rest of the session rather than
+            # freed here, the way test_settings_dialog keeps its dialogs. A test
+            # may end with work still in flight — the push-to-talk ones stop
+            # mid-transcription deliberately — and _transcribed is a *queued*
+            # signal, whose delivery in turn starts the injector's paste timers.
+            # Free the app while any of that is still addressed to it and a
+            # later test pumps the event queue, Qt delivers into freed memory,
+            # and the suite dies with a segfault or bus error in whichever
+            # innocent test happened to run next (test_full_cycle, usually).
+            # Draining the worker is not enough, because the queue outlives it.
+            # A reference per test is cheap and makes the whole class of crash
+            # impossible instead of merely unlikely.
+            _SESSION_APPS.append(instance)
 
 
 @pytest.fixture
@@ -1159,8 +1176,12 @@ class TestModelDownloadProgress:
 class TestAudioDucking:
     """Other apps go quiet while recording; every exit path brings them back."""
 
-    def _ducked(self, app):
-        app.ducker = MagicMock()
+    def _ducked(self, app, cue_lead_ms=0):
+        # cue_lead_ms explicitly, not a MagicMock child: QTimer.start() will not
+        # take a mock, and it raises inside _start_recording rather than at the
+        # ducking assertion, so the failure reads as unrelated. Zero is Windows,
+        # where ducking is inline; a lead is macOS, where it waits out the cue.
+        app.ducker = MagicMock(cue_lead_ms=cue_lead_ms)
         # A plain stub, not the fixture's MagicMock. Stopping a recording submits a
         # transcription, so the worker thread reaches the backend while this thread
         # is still asserting on the ducker — and unittest.mock is not thread-safe,
@@ -1174,10 +1195,46 @@ class TestAudioDucking:
     def test_recording_ducks_and_stopping_restores(self, app):
         ducker = self._ducked(app)
         app._on_toggle()  # start recording
-        ducker.duck.assert_called_once()
+        ducker.duck.assert_called_once()  # no lead to wait out: inline, as before
         ducker.restore.assert_not_called()
         app._on_toggle()  # stop
         ducker.restore.assert_called_once()
+
+    def test_a_lead_defers_the_duck_until_the_cue_has_played(self, app):
+        # macOS dips the whole machine, so ducking inline would silence our own
+        # start cue. The timer is fired by hand, the way this file drives
+        # _on_max_duration, keeping everything on the main thread.
+        ducker = self._ducked(app, cue_lead_ms=300)
+        app._on_toggle()
+        ducker.duck.assert_not_called()
+        app._duck_now()
+        ducker.duck.assert_called_once()
+        app._on_toggle()  # stop
+        ducker.restore.assert_called_once()
+
+    def test_a_recording_shorter_than_the_lead_never_ducks(self, app):
+        # A push-to-talk tap: the timer would otherwise fire after the restore,
+        # and on macOS the dip would then never be put back.
+        ducker = self._ducked(app, cue_lead_ms=300)
+        app._on_toggle()
+        app._on_toggle()
+        app._duck_now()
+        ducker.duck.assert_not_called()
+
+    def test_quitting_before_the_lead_expires_does_not_duck(self, app):
+        ducker = self._ducked(app, cue_lead_ms=300)
+        app._on_toggle()
+        app._quit()
+        app._duck_now()
+        ducker.duck.assert_not_called()
+        ducker.restore.assert_called_once()
+
+    def test_replacing_the_ducker_restores_the_old_one_first(self, app):
+        # A ducker thrown away while holding saved levels never gives them back.
+        ducker = self._ducked(app)
+        app._apply_settings(dataclasses.replace(app.cfg, duck_other_audio=False))
+        ducker.restore.assert_called_once()
+        assert app.ducker is not ducker
 
     def test_mic_failure_does_not_duck(self, app):
         ducker = self._ducked(app)
