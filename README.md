@@ -108,7 +108,7 @@ the rest are typed once and left alone, which is why they are not on it.
 | `use_gpu` | `true` | Windows/Linux only: `false` stops GPU acceleration being used without deleting its libraries — **Settings… → Advanced → GPU acceleration → Disable…** sets it. See [Speed](#speed) |
 | `max_recording_seconds` | `120` | Auto-stop guard |
 | `play_sounds` | `true` | Start/stop audio cues |
-| `duck_other_audio` | `false` | Turn other audio down while recording and put it back when the recording stops. Windows turns each other application down on its own; macOS has no per-application volume, so the **system output volume** is dipped instead and the whole Mac goes quiet for the length of the recording. Not available on Linux. See [Ducking other audio](#ducking-other-audio) |
+| `duck_other_audio` | `true` | Turn other audio down while recording and put it back when the recording stops. Windows turns each other application down on its own; macOS has no per-application volume, so the **system output volume** is dipped instead and the whole Mac goes quiet for the length of the recording. Not available on Linux. See [Ducking other audio](#ducking-other-audio) |
 | `duck_volume` | `0.0` | How loud audio stays while ducked, as a 0–1 fraction of its current volume — the default silences it; `0.2` keeps it at 20%. On macOS that is the system output volume, so the default mutes the Mac while recording |
 | `paste_delay_ms` | `150` | Clipboard settle time before pasting |
 | `clipboard_restore_delay_ms` | `300` | Wait before restoring your old clipboard |

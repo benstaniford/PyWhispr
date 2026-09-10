@@ -82,7 +82,7 @@ class Config:
     # Windows turns each other application down individually; macOS has no per-app
     # output volume, so it dips the default output device — the whole machine, our
     # own cues included. Ignored elsewhere. See ducking.py.
-    duck_other_audio: bool = False
+    duck_other_audio: bool = True
     duck_volume: float = 0.0
     paste_delay_ms: int = 150
     clipboard_restore_delay_ms: int = 300

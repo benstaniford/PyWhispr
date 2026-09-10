@@ -54,11 +54,15 @@ def isolated_app(**config_kwargs):
         # TestContinuationJoin below turns it back on.
         # offer_gpu_setup=False: readying the model must not pop the GPU offer
         # in tests that are about something else.
+        # duck_other_audio=False: on by default since it shipped, but an app built
+        # with it on carries a real OutputVolumeDucker, and a test that starts a
+        # recording would dip the developer's actual output volume.
         defaults = dict(
             play_sounds=False,
             api_enabled=False,
             join_continuations=False,
             offer_gpu_setup=False,
+            duck_other_audio=False,
         )
         instance = PyWhisprApp(Config(**{**defaults, **config_kwargs}))
         instance._test_backend = backend
@@ -1278,7 +1282,12 @@ class TestAudioDucking:
         app._quit()
         ducker.restore.assert_called_once()
 
-    def test_ducking_is_off_by_default(self, app):
+    def test_ducking_is_on_by_default(self):
+        # The fixture turns it off so no test can move the developer's real
+        # volume, so the default is asserted on the config alone.
+        assert Config().duck_other_audio
+
+    def test_the_fixture_keeps_ducking_away_from_the_real_volume(self, app):
         from pywhispr.ducking import NoOpDucker
 
         assert isinstance(app.ducker, NoOpDucker)

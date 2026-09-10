@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import pywhispr
 from pywhispr import ducking, flavor
 from pywhispr.audio import all_input_devices, display_name, input_devices
 from pywhispr.config import Config
@@ -98,7 +99,7 @@ class SettingsDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle(f"{flavor.PRODUCT_NAME} Settings")
+        self.setWindowTitle(f"{flavor.PRODUCT_NAME} {pywhispr.__version__} Settings")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setMinimumWidth(460)
         # A copy: cancelling has to leave the running app's config untouched.
