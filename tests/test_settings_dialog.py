@@ -201,3 +201,26 @@ class TestDuckingRow:
         dialog = build()
         assert not dialog._duck.isEnabled()
         assert dialog._duck.toolTip() == "Windows and macOS only"
+
+    def test_the_slider_shows_the_configured_level(self, build):
+        dialog = build(Config(duck_other_audio=True, duck_volume=0.3))
+        assert dialog._duck_volume.value() == 30
+
+    def test_moving_the_slider_round_trips(self, build):
+        dialog = build(Config(duck_other_audio=True, duck_volume=0.0))
+        dialog._duck_volume.setValue(40)
+        with patch.object(dialog, "accept"):
+            dialog._save()
+        assert dialog.config.duck_volume == pytest.approx(0.4)
+
+    def test_the_slider_follows_the_checkbox(self, build, monkeypatch):
+        monkeypatch.setattr("pywhispr.ui.settings_dialog.sys.platform", "darwin")
+        dialog = build(Config(duck_other_audio=True))
+        assert dialog._duck_volume.isEnabled()
+        dialog._duck.setChecked(False)
+        assert not dialog._duck_volume.isEnabled()
+
+    def test_the_slider_is_disabled_where_ducking_is_unsupported(self, build, monkeypatch):
+        monkeypatch.setattr("pywhispr.ui.settings_dialog.sys.platform", "linux")
+        dialog = build(Config(duck_other_audio=True))
+        assert not dialog._duck_volume.isEnabled()

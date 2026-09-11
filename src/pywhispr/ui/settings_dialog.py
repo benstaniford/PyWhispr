@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSlider,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -52,6 +53,7 @@ EDITED_FIELDS = (
     "max_recording_seconds",
     "play_sounds",
     "duck_other_audio",
+    "duck_volume",
     "remove_fillers",
     "join_continuations",
     "lowercase_continuations",
@@ -171,12 +173,42 @@ class SettingsDialog(QDialog):
         if system_wide:
             self._duck.setToolTip(
                 "macOS has no per-application volume, so the whole output device is "
-                "turned down and put back when the recording stops. duck_volume in "
-                "the config file sets how far."
+                "turned down to the level below and put back when the recording stops."
             )
         elif not self._duck.isEnabled():
             self._duck.setToolTip("Windows and macOS only")
         form.addRow("", self._duck)
+
+        # The dip level (duck_volume, a 0–1 fraction of the current volume) used to
+        # be a config-file-only knob. The slider reads as the *target* volume: far
+        # left silences other audio, far right leaves it untouched.
+        self._duck_volume = QSlider(Qt.Orientation.Horizontal)
+        self._duck_volume.setRange(0, 100)
+        self._duck_volume.setValue(round(self.config.duck_volume * 100))
+        self._duck_volume.setToolTip(
+            "How loud other audio stays while recording: 0% silences it, "
+            "100% leaves it unchanged."
+        )
+        duck_level_label = QLabel()
+        duck_level_label.setMinimumWidth(40)
+        self._duck_volume.valueChanged.connect(
+            lambda value: duck_level_label.setText(f"{value}%")
+        )
+        duck_level_label.setText(f"{self._duck_volume.value()}%")
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(QLabel("Silent"))
+        row_layout.addWidget(self._duck_volume)
+        row_layout.addWidget(duck_level_label)
+
+        def _sync_duck_volume_enabled(*_):
+            enabled = self._duck.isEnabled() and self._duck.isChecked()
+            row.setEnabled(enabled)
+
+        self._duck.toggled.connect(_sync_duck_volume_enabled)
+        _sync_duck_volume_enabled()
+        form.addRow("Other audio volume", row)
         return page
 
     def _text_tab(self, on_edit_vocabulary) -> QWidget:
@@ -384,6 +416,7 @@ class SettingsDialog(QDialog):
         cfg.max_recording_seconds = self._max_seconds.value()
         cfg.play_sounds = self._play_sounds.isChecked()
         cfg.duck_other_audio = self._duck.isChecked()
+        cfg.duck_volume = self._duck_volume.value() / 100
         cfg.remove_fillers = self._remove_fillers.isChecked()
         cfg.join_continuations = self._join.isChecked()
         cfg.lowercase_continuations = self._lowercase.isChecked()
