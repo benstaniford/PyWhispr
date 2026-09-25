@@ -45,6 +45,39 @@ class TestReset:
         with pytest.raises(RuntimeError):
             AudioRecorder().reset()
 
+    def test_stop_keeps_captured_audio_when_the_stream_will_not_close(self):
+        # A device that vanished mid-recording (undock) can make stop()/close()
+        # raise. The audio already captured must survive, and the recorder must
+        # be left non-recording rather than stranding the caller.
+        recorder = self._recording()
+        recorder._stream.stop.side_effect = RuntimeError("device gone")
+        audio = recorder.stop()
+        assert len(audio) == 1600
+        assert not recorder.recording
+
+
+class TestRefreshDevices:
+    def test_it_cycles_portaudio_to_re_enumerate(self):
+        from pywhispr.audio import refresh_devices
+
+        fake = MagicMock()
+        import sys
+
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            refresh_devices()
+        fake._terminate.assert_called_once()
+        fake._initialize.assert_called_once()
+
+    def test_a_failure_is_swallowed(self):
+        from pywhispr.audio import refresh_devices
+
+        fake = MagicMock()
+        fake._terminate.side_effect = RuntimeError("boom")
+        import sys
+
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            refresh_devices()  # must not raise
+
 
 def test_level_is_monotonic_in_amplitude():
     t = np.arange(1600) / 16000

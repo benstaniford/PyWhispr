@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication
 from pywhispr import flavor, gpu
 from pywhispr.acronyms import is_acronym_substitution, to_acronyms
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
-from pywhispr.audio import AudioRecorder, find_device
+from pywhispr.audio import AudioRecorder, find_device, refresh_devices
 from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, save_config
 from pywhispr.ducking import create_ducker
@@ -801,10 +801,21 @@ class PyWhisprApp(QObject):
         self.recorder.device = self._input_device()
         try:
             self.recorder.start()
-        except Exception as exc:
-            log.exception("Could not open microphone")
-            self.tray.notify("Microphone error", str(exc))
-            return
+        except Exception:
+            # The mic may have gone (e.g. undock) since PortAudio last enumerated
+            # its device list, which it does only at import. Refresh the hardware
+            # list, re-resolve the device — which now sees the mic is absent, so
+            # it notifies and falls back to the system default — and try once more
+            # before giving up.
+            log.warning("Microphone open failed; refreshing devices and retrying")
+            refresh_devices()
+            self.recorder.device = self._input_device()
+            try:
+                self.recorder.start()
+            except Exception as exc:
+                log.exception("Could not open microphone")
+                self.tray.notify("Microphone error", str(exc))
+                return
         self._set_state(State.RECORDING)
         if self.ducker.cue_lead_ms:
             # Only macOS needs the wait, and it gets a singleShot bound to self

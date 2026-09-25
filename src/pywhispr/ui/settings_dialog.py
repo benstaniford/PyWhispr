@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 import pywhispr
 from pywhispr import ducking, flavor
-from pywhispr.audio import all_input_devices, display_name, input_devices
+from pywhispr.audio import all_input_devices, display_name, input_devices, refresh_devices
 from pywhispr.config import Config
 
 log = logging.getLogger(__name__)
@@ -337,6 +337,10 @@ class SettingsDialog(QDialog):
         so that opening this window while it is unplugged does not silently reset
         the choice to the default.
         """
+        # Re-enumerate first: PortAudio's list is frozen at import, so a mic
+        # plugged or unplugged (undock) since then would otherwise be invisible
+        # to someone opening this window to fix exactly that.
+        refresh_devices()
         chosen = self._chosen_device_name()
         self._mic.clear()
         self._mic.addItem(SYSTEM_DEFAULT, None)

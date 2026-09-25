@@ -1659,3 +1659,32 @@ class TestMicrophoneChoice:
         with patch("pywhispr.app.find_device", return_value=4):
             app._start_recording()
         assert app.recorder.device == 4
+
+    def test_a_failed_open_refreshes_the_device_list_and_retries(self, app):
+        """An undock leaves PortAudio's list stale; a failed open must refresh
+        and retry rather than abandon the recording."""
+        app._on_model_ready()
+        app.cfg.input_device_name = "Yeti"
+        app.recorder.start.side_effect = [Exception("device gone"), None]
+        # The dock mic resolves once (stale table), then is absent after refresh.
+        with (
+            patch("pywhispr.app.refresh_devices") as refresh,
+            patch("pywhispr.app.find_device", side_effect=[4, None]),
+        ):
+            app._start_recording()
+        refresh.assert_called_once()
+        assert app.recorder.start.call_count == 2
+        assert app.recorder.device is None  # fell back to the system default
+        assert app.state == State.RECORDING
+
+    def test_a_persistently_failing_open_gives_up_and_says_so(self, app):
+        app._on_model_ready()
+        app.recorder.start.side_effect = Exception("no microphone at all")
+        with (
+            patch("pywhispr.app.refresh_devices"),
+            patch("pywhispr.app.find_device", return_value=None),
+        ):
+            app._start_recording()
+        assert app.recorder.start.call_count == 2
+        assert app.state == State.IDLE
+        assert app.tray.notify.called

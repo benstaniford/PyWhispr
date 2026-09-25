@@ -44,6 +44,26 @@ PSEUDO_DEVICES = frozenset({"Primary Sound Capture Driver", "Microsoft Sound Map
 MME_NAME_LIMIT = 31
 
 
+def refresh_devices() -> None:
+    """Re-enumerate audio hardware so a mic added/removed since import is seen.
+
+    PortAudio snapshots its device list at Pa_Initialize (on import) and never
+    re-scans, so after an undock ``find_device`` and ``InputStream`` consult a
+    stale table — the vanished mic still "appears" present and the system-default
+    index points at the wrong device. Cycling terminate/initialize is
+    sounddevice's documented way to refresh the list. Best-effort: a failure here
+    must not stop a recording from being attempted, and it is only safe to call
+    with no stream open, which is why the record path calls it before opening one.
+    """
+    import sounddevice as sd
+
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception:
+        log.exception("Could not refresh the audio device list")
+
+
 def all_input_devices() -> list[tuple[int, str]]:
     """(index, name) for every device that can record, every host API included.
 
@@ -193,8 +213,14 @@ class AudioRecorder:
         if self._stream is None:
             raise RuntimeError("Not recording")
         stream, self._stream = self._stream, None
-        stream.stop()
-        stream.close()
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            # The device may have vanished mid-recording (undock). The blocks
+            # already captured are still good; losing the stream must not lose
+            # them, nor strand the caller mid state-transition.
+            log.exception("Error closing the audio stream; keeping captured audio")
         audio = (
             np.concatenate(self._blocks) if self._blocks else np.zeros(0, dtype=np.float32)
         )
