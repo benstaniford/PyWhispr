@@ -795,18 +795,27 @@ class PyWhisprApp(QObject):
         if self._missing_device is not None:
             log.info("Microphone %r is back", name)
             self._missing_device = None
+            # Said as loudly as the disappearance was: a switch back that nobody
+            # mentions looks like the fallback never happened.
+            self.tray.notify("Microphone reconnected", f"Recording with {name} again.")
         return index
 
     def _start_recording(self) -> None:
+        # PortAudio's device table — the system default's index included — is a
+        # snapshot taken when it initialised, so without a re-scan an undock keeps
+        # resolving to the dock's microphone and a re-dock never finds the chosen
+        # one again. Refreshing only after a failed open was not enough: on macOS a
+        # stale entry opens happily and records nothing. Cheap (~3 ms on Core
+        # Audio), and safe here because no stream is open in IDLE.
+        refresh_devices()
         self.recorder.device = self._input_device()
         try:
             self.recorder.start()
         except Exception:
-            # The mic may have gone (e.g. undock) since PortAudio last enumerated
-            # its device list, which it does only at import. Refresh the hardware
-            # list, re-resolve the device — which now sees the mic is absent, so
-            # it notifies and falls back to the system default — and try once more
-            # before giving up.
+            # Belt-and-braces: the device went between the refresh and the open,
+            # or the refresh itself failed. Re-scan, re-resolve — which now sees
+            # the mic is absent, so it notifies and falls back to the system
+            # default — and try once more before giving up.
             log.warning("Microphone open failed; refreshing devices and retrying")
             refresh_devices()
             self.recorder.device = self._input_device()

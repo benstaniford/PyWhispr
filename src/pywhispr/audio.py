@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -51,17 +52,22 @@ def refresh_devices() -> None:
     re-scans, so after an undock ``find_device`` and ``InputStream`` consult a
     stale table — the vanished mic still "appears" present and the system-default
     index points at the wrong device. Cycling terminate/initialize is
-    sounddevice's documented way to refresh the list. Best-effort: a failure here
+    sounddevice's documented way to refresh the list. Called at every recording
+    start, which it is cheap enough for (~3 ms on Core Audio; the elapsed time is
+    logged at debug so other host APIs can be checked). Best-effort: a failure here
     must not stop a recording from being attempted, and it is only safe to call
     with no stream open, which is why the record path calls it before opening one.
     """
     import sounddevice as sd
 
+    started = time.perf_counter()
     try:
         sd._terminate()
         sd._initialize()
     except Exception:
         log.exception("Could not refresh the audio device list")
+        return
+    log.debug("Audio device list refreshed in %.1f ms", 1000 * (time.perf_counter() - started))
 
 
 def all_input_devices() -> list[tuple[int, str]]:

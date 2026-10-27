@@ -44,6 +44,9 @@ def isolated_app(**config_kwargs):
         # Nothing here should claim a real system-wide hotkey. A fresh mock per
         # call, so the dictation and recall listeners are told apart.
         patch("pywhispr.app.create_hotkey_listener", side_effect=lambda *a, **k: MagicMock()),
+        # Every recording start re-scans the audio hardware, which would cycle the
+        # real PortAudio under a test that is about something else.
+        patch("pywhispr.app.refresh_devices"),
     ):
         recorder = recorder_cls.return_value
         recorder.recording = False
@@ -1651,7 +1654,47 @@ class TestMicrophoneChoice:
             app._input_device()
             app._input_device()
             app._input_device()
-        assert app.tray.notify.call_count == 2
+        titles = [c.args[0] for c in app.tray.notify.call_args_list]
+        assert titles == [
+            "Microphone unavailable",
+            "Microphone reconnected",
+            "Microphone unavailable",
+        ]
+
+    def test_a_device_that_was_never_missing_is_not_announced(self, app):
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", return_value=2):
+            app._input_device()
+            app._input_device()
+        app.tray.notify.assert_not_called()
+
+    def test_every_recording_rescans_before_resolving(self, app):
+        """PortAudio's table is a snapshot, and on macOS a stale entry opens
+        without complaint — so the re-scan cannot wait for a failed open."""
+        app._on_model_ready()
+        app.cfg.input_device_name = "Yeti"
+        order = []
+        with (
+            patch("pywhispr.app.refresh_devices", side_effect=lambda: order.append("refresh")),
+            patch("pywhispr.app.find_device", side_effect=lambda _: order.append("find") or 4),
+        ):
+            app._start_recording()
+        assert order == ["refresh", "find"]
+        assert app.recorder.start.call_count == 1
+
+    def test_undock_then_redock_follows_the_microphone(self, app):
+        """Undocked: the chosen mic is gone, so the system default records.
+        Docked again: the next dictation is back on the chosen mic."""
+        app._on_model_ready()
+        app.cfg.input_device_name = "Yeti"
+        with patch("pywhispr.app.find_device", side_effect=[None, 4]):
+            app._start_recording()
+            assert app.recorder.device is None
+            app.state = State.IDLE
+            app._start_recording()
+            assert app.recorder.device == 4
+        titles = [c.args[0] for c in app.tray.notify.call_args_list]
+        assert titles == ["Microphone unavailable", "Microphone reconnected"]
 
     def test_recording_opens_the_resolved_device(self, app):
         app._on_model_ready()
@@ -1672,7 +1715,7 @@ class TestMicrophoneChoice:
             patch("pywhispr.app.find_device", side_effect=[4, None]),
         ):
             app._start_recording()
-        refresh.assert_called_once()
+        assert refresh.call_count == 2  # up front, then again after the failure
         assert app.recorder.start.call_count == 2
         assert app.recorder.device is None  # fell back to the system default
         assert app.state == State.RECORDING

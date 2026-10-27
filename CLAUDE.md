@@ -105,8 +105,14 @@ preference lives on the page. `tray.py` keeps `open_config`/`open_log` because
   list, so unplugging any *other* device renumbers it and the "chosen" microphone
   silently becomes a different one. The old `input_device` index is still read for
   configs that have one — nothing to migrate, nothing lost on upgrade.
+- **Every recording start re-scans the hardware first** (`audio.refresh_devices`,
+  a PortAudio terminate/initialize, ~3 ms on Core Audio). PortAudio's device table
+  — the system default's index included — is a snapshot from initialisation, so
+  without it an undock keeps resolving to the dock's mic and a re-dock never finds
+  the chosen one again. Refreshing only after a *failed* open was the first fix and
+  it did not work: on macOS a stale entry opens happily and records nothing.
 - **A missing device falls back to the default and says so**, once per
-  disappearance (`_missing_device`): the whole point of choosing a microphone is
+  disappearance (`_missing_device`), and its return is announced the same way: the whole point of choosing a microphone is
   that the default is the wrong one, so a silent fallback is the bug. The page
   keeps an unplugged choice in the list, marked, or opening settings would reset
   it just by being opened.
