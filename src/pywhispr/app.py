@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication
 from pywhispr import flavor, gpu
 from pywhispr.acronyms import is_acronym_substitution, to_acronyms
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
-from pywhispr.audio import AudioRecorder, find_device, refresh_devices
+from pywhispr.audio import WEDGED_MESSAGE, AudioRecorder, find_device, refresh_devices
 from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, save_config
 from pywhispr.ducking import create_ducker
@@ -801,6 +801,14 @@ class PyWhisprApp(QObject):
         return index
 
     def _start_recording(self) -> None:
+        if self.recorder.wedged:
+            # A stream close is still stuck inside Core Audio holding PortAudio's
+            # locks, so even the device refresh below would freeze the GUI thread.
+            # Say why nothing happens rather than doing nothing.
+            log.warning("Hotkey pressed but the audio system is wedged")
+            self.overlay.show_status(f"Audio stuck — restart {flavor.PRODUCT_NAME}")
+            QTimer.singleShot(2500, lambda: self.state == State.IDLE and self.overlay.hide_overlay())
+            return
         # PortAudio's device table — the system default's index included — is a
         # snapshot taken when it initialised, so without a re-scan an undock keeps
         # resolving to the dock's microphone and a re-dock never finds the chosen
@@ -853,6 +861,9 @@ class PyWhisprApp(QObject):
             # must get their volume back — Windows would remember the ducked
             # levels forever.
             self.ducker.restore()
+        if self.recorder.wedged:
+            # The audio captured so far is still good, so transcribe it as usual.
+            self._report_error("Audio stopped responding", WEDGED_MESSAGE)
         self._play("stop.wav")
         self._set_state(State.TRANSCRIBING)
         self.overlay.show_status("Transcribing…")
@@ -1197,7 +1208,9 @@ class PyWhisprApp(QObject):
         self._pending_actions = ()  # a cycle that ended another way runs nothing
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)
-        self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
+        # A wedged recorder keeps its message: "Ready" would be a lie.
+        if not self.recorder.wedged:
+            self.tray.set_status(f"Ready — press {self.cfg.hotkey} to dictate")
 
     # -- history recall ------------------------------------------------------
 

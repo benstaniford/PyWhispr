@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 
@@ -13,6 +14,12 @@ from pywhispr.stt.base import SAMPLE_RATE
 log = logging.getLogger(__name__)
 
 BLOCK_SIZE = 1600  # 100 ms at 16 kHz → level updates 10x/sec
+
+# How long stopping the stream may take before it counts as wedged. A healthy
+# stop is a few milliseconds; this only has to be shorter than a user's patience.
+STOP_TIMEOUT_S = 2.0
+
+WEDGED_MESSAGE = "The audio system stopped responding. Restart the app to record again."
 
 
 def rms_level(block: np.ndarray) -> float:
@@ -171,6 +178,10 @@ class AudioRecorder:
         self._on_level = on_level
         self._stream = None
         self._blocks: list[np.ndarray] = []
+        # Set when a stream would not stop in time. Its close is still blocked
+        # inside Core Audio, holding PortAudio's locks, so no further call into
+        # PortAudio — opening a stream, refreshing the device list — is safe.
+        self.wedged = False
 
     @property
     def recording(self) -> bool:
@@ -179,6 +190,8 @@ class AudioRecorder:
     def start(self) -> None:
         import sounddevice as sd
 
+        if self.wedged:
+            raise RuntimeError(WEDGED_MESSAGE)
         if self._stream is not None:
             raise RuntimeError("Already recording")
         self._blocks = []
@@ -215,18 +228,40 @@ class AudioRecorder:
         self._blocks = []
         log.debug("Recording reset: %d block(s) dropped", dropped)
 
-    def stop(self) -> np.ndarray:
+    def stop(self, timeout: float = STOP_TIMEOUT_S) -> np.ndarray:
+        """End the recording and return what was captured.
+
+        The stream is stopped on a thread of its own, waited for up to
+        ``timeout``. PortAudio's Core Audio backend can deadlock in
+        ``Pa_StopStream``: ``AudioOutputUnitStop`` holds the AudioUnit's lock
+        while waiting on the HAL's IO mutex, and the IO thread holds that mutex
+        while PortAudio's is-running listener asks the AudioUnit for a property.
+        Seen from a stop that followed a start closely (a double-pressed hotkey).
+        Called on the GUI thread, that froze the whole app for good; now the
+        captured audio is still returned and ``wedged`` says what happened.
+        """
         if self._stream is None:
             raise RuntimeError("Not recording")
         stream, self._stream = self._stream, None
-        try:
-            stream.stop()
-            stream.close()
-        except Exception:
-            # The device may have vanished mid-recording (undock). The blocks
-            # already captured are still good; losing the stream must not lose
-            # them, nor strand the caller mid state-transition.
-            log.exception("Error closing the audio stream; keeping captured audio")
+        closed = threading.Event()
+
+        def close():
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                # The device may have vanished mid-recording (undock). The blocks
+                # already captured are still good; losing the stream must not lose
+                # them, nor strand the caller mid state-transition.
+                log.exception("Error closing the audio stream; keeping captured audio")
+            finally:
+                closed.set()
+
+        # Daemon: a close stuck in Core Audio must not hold the process open at exit.
+        threading.Thread(target=close, name="pywhispr-audio-close", daemon=True).start()
+        if not closed.wait(timeout):
+            self.wedged = True
+            log.error("Audio stream did not stop within %.1fs; PortAudio is wedged", timeout)
         audio = (
             np.concatenate(self._blocks) if self._blocks else np.zeros(0, dtype=np.float32)
         )

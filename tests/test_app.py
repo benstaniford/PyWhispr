@@ -50,6 +50,7 @@ def isolated_app(**config_kwargs):
     ):
         recorder = recorder_cls.return_value
         recorder.recording = False
+        recorder.wedged = False  # a bare MagicMock attribute would be truthy
         recorder.stop.return_value = np.zeros(16000, dtype=np.float32)
         # api_enabled=False: these tests must not open a listening socket.
         # join_continuations=False: these tests are about the state machine, so
@@ -1731,3 +1732,38 @@ class TestMicrophoneChoice:
         assert app.recorder.start.call_count == 2
         assert app.state == State.IDLE
         assert app.tray.notify.called
+
+
+class TestWedgedAudio:
+    """PortAudio can deadlock inside Core Audio while stopping a stream; the
+    recorder then gives up waiting and flags itself wedged. The app must keep
+    the words, say what happened, and never call into PortAudio again."""
+
+    def _wedge_on_stop(self, app):
+        def stop():
+            app.recorder.wedged = True
+            return np.zeros(16000, dtype=np.float32)
+
+        app.recorder.stop.side_effect = stop
+
+    def test_a_wedged_stop_still_transcribes_and_says_so(self, app, qtbot):
+        app._on_model_ready()
+        app._test_backend.transcribe.return_value = "hello"
+        app._on_toggle()
+        self._wedge_on_stop(app)
+        app._on_toggle()
+        wait_for_worker(app, qtbot)
+        app._test_backend.transcribe.assert_called_once()
+        assert "Audio stopped responding" in [c.args[0] for c in app.tray.notify.call_args_list]
+        # The cycle finishing must not paper over it with "Ready".
+        assert app.state == State.IDLE
+        assert "Ready" not in app.tray.set_status.call_args.args[0]
+
+    def test_a_wedged_recorder_is_never_touched_again(self, app):
+        app._on_model_ready()
+        app.recorder.wedged = True
+        with patch("pywhispr.app.refresh_devices") as refresh:
+            app._on_toggle()
+        refresh.assert_not_called()  # would block on the stuck PortAudio
+        app.recorder.start.assert_not_called()
+        assert app.state == State.IDLE

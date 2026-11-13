@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -54,6 +55,62 @@ class TestReset:
         audio = recorder.stop()
         assert len(audio) == 1600
         assert not recorder.recording
+
+
+class _HangingStream:
+    """A stream whose stop() blocks, like PortAudio deadlocked in Core Audio.
+
+    Deliberately not a MagicMock: stop() runs on the recorder's close thread,
+    and mocks reached from a second thread are what hung this suite before.
+    """
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.closed = threading.Event()
+
+    def stop(self):
+        self.release.wait(10)
+
+    def close(self):
+        self.closed.set()
+
+
+class TestWedgedStream:
+    def _recording(self, stream) -> AudioRecorder:
+        recorder = AudioRecorder()
+        recorder._stream = stream
+        recorder._blocks = [np.ones(1600, dtype=np.float32)]
+        return recorder
+
+    def test_a_stop_that_never_returns_keeps_the_audio_and_flags_the_wedge(self):
+        stream = _HangingStream()
+        recorder = self._recording(stream)
+        try:
+            audio = recorder.stop(timeout=0.05)
+            assert len(audio) == 1600  # the words were captured; keep them
+            assert not recorder.recording
+            assert recorder.wedged
+        finally:
+            stream.release.set()
+
+    def test_a_wedged_recorder_refuses_to_start(self):
+        # Opening a stream would call into the PortAudio that is still stuck.
+        stream = _HangingStream()
+        recorder = self._recording(stream)
+        try:
+            recorder.stop(timeout=0.05)
+            with pytest.raises(RuntimeError):
+                recorder.start()
+        finally:
+            stream.release.set()
+
+    def test_a_prompt_stop_is_not_a_wedge(self):
+        stream = _HangingStream()
+        stream.release.set()
+        recorder = self._recording(stream)
+        recorder.stop(timeout=5)
+        assert stream.closed.is_set()
+        assert not recorder.wedged
 
 
 class TestRefreshDevices:

@@ -111,6 +111,16 @@ preference lives on the page. `tray.py` keeps `open_config`/`open_log` because
   without it an undock keeps resolving to the dock's mic and a re-dock never finds
   the chosen one again. Refreshing only after a *failed* open was the first fix and
   it did not work: on macOS a stale entry opens happily and records nothing.
+- **The stream is stopped off the GUI thread, with a timeout** (`AudioRecorder.stop`,
+  `STOP_TIMEOUT_S`). PortAudio's Core Audio backend can deadlock in `Pa_StopStream`
+  — `AudioOutputUnitStop` holds the AudioUnit lock waiting on the HAL IO mutex
+  while the IO thread holds that mutex inside PortAudio's is-running listener,
+  which wants the AudioUnit lock. Caught by `sample` on a hung bundle after a
+  double-pressed hotkey; on the GUI thread it froze the app for good. A timeout
+  keeps the captured audio, sets `recorder.wedged`, and the app then reports it and
+  **never calls PortAudio again** — even `refresh_devices` would block on the
+  stuck locks. Only a restart recovers. `sample <pid>` works under the MDM where
+  `lldb` does not.
 - **A missing device falls back to the default and says so**, once per
   disappearance (`_missing_device`), and its return is announced the same way: the whole point of choosing a microphone is
   that the default is the wrong one, so a silent fallback is the bug. The page
