@@ -535,6 +535,7 @@ class PyWhisprApp(QObject):
             # remembers per-app mixer levels, so quitting while ducked would
             # leave the user's other apps quiet for good.
             self.ducker.restore()
+            self._release_clipboard()
         self._worker.shutdown(wait=False)
         if self._actions is not None:
             self._actions.stop()
@@ -834,6 +835,7 @@ class PyWhisprApp(QObject):
                 self.tray.notify("Microphone error", str(exc))
                 return
         self._set_state(State.RECORDING)
+        self._hold_clipboard()
         if self.ducker.cue_lead_ms:
             # Only macOS needs the wait, and it gets a singleShot bound to self
             # rather than a timer of our own: a member QTimer connected to a
@@ -906,6 +908,25 @@ class PyWhisprApp(QObject):
     def _back_to_recording_overlay(self) -> None:
         if self.state == State.RECORDING:
             self.overlay.show_recording()
+
+    def _hold_clipboard(self) -> None:
+        """Without auto-paste, empty the clipboard so an early Cmd+V pastes nothing.
+
+        The user cannot see when the transcript has landed, and a paste a moment
+        too soon used to insert whatever was copied before. Never raises: a
+        clipboard trick is not worth a recording.
+        """
+        try:
+            self.injector.hold_clipboard()
+        except Exception:
+            log.exception("Could not clear the clipboard for the dictation")
+
+    def _release_clipboard(self) -> None:
+        """Give the held clipboard back. A no-op once a transcript replaced it."""
+        try:
+            self.injector.release_clipboard()
+        except Exception:
+            log.exception("Could not restore the clipboard")
 
     def _duck_now(self) -> None:
         # The guard is the whole safety net, not a belt on top of one: a
@@ -1206,6 +1227,9 @@ class PyWhisprApp(QObject):
         self._last_inserted = None
         self._rich_spans = ()
         self._pending_actions = ()  # a cycle that ended another way runs nothing
+        # Empty transcript, a failed one, or one a plugin consumed whole: the
+        # clipboard emptied at the start of the recording comes back.
+        self._release_clipboard()
         self.overlay.hide_overlay()
         self._set_state(State.IDLE)
         # A wedged recorder keeps its message: "Ready" would be a lie.
