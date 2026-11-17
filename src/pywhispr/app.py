@@ -18,7 +18,13 @@ from PySide6.QtWidgets import QApplication
 from pywhispr import flavor, gpu
 from pywhispr.acronyms import is_acronym_substitution, to_acronyms
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
-from pywhispr.audio import WEDGED_MESSAGE, AudioRecorder, find_device, refresh_devices
+from pywhispr.audio import (
+    WEDGED_MESSAGE,
+    AudioRecorder,
+    find_device,
+    refresh_devices,
+    trim_silence,
+)
 from pywhispr.caret import ContextTracker
 from pywhispr.config import Config, save_config
 from pywhispr.ducking import create_ducker
@@ -82,6 +88,7 @@ class PyWhisprApp(QObject):
     _hotkey_toggled = Signal()
     _hotkey_released = Signal(float)  # double-tap activating key released; held seconds
     _reset_requested = Signal()
+    _pause_requested = Signal()
     _history_requested = Signal()
     _mic_level = Signal(float)
     _model_ready = Signal()
@@ -160,11 +167,13 @@ class PyWhisprApp(QObject):
         # Its own listener, and one that is never stopped around a dialog the way
         # the dictation one is: pressing it does nothing outside RECORDING, and
         # no dialog can be open while a recording is running.
-        self.reset_listener = (
-            create_hotkey_listener(cfg.reset_hotkey, on_toggle=self._reset_requested.emit)
-            if cfg.reset_hotkey and cfg.reset_hotkey != cfg.hotkey
-            else None
-        )
+        # The pause one is the same shape for the same reason.
+        self.reset_listener = self._side_listener(cfg.reset_hotkey, self._reset_requested.emit)
+        self.pause_listener = self._side_listener(cfg.pause_hotkey, self._pause_requested.emit)
+        # Paused mid-recording: the stream stays open and drops its blocks. Kept
+        # here rather than read off the recorder — the app owns recording state.
+        self._paused = False
+        self._max_duration_left = 0  # ms left on the max-duration clock at pause
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pywhispr-stt")
         self._model_error: str | None = None
 
@@ -198,6 +207,7 @@ class PyWhisprApp(QObject):
         self._hotkey_toggled.connect(self._on_activate)
         self._hotkey_released.connect(self._on_activation_key_released)
         self._reset_requested.connect(self._on_reset)
+        self._pause_requested.connect(self._on_pause)
         self._history_requested.connect(self._show_history)
         self._mic_level.connect(self.overlay.on_level)
         self._model_ready.connect(self._on_model_ready)
@@ -247,14 +257,19 @@ class PyWhisprApp(QObject):
             # queued signal is how everything else here crosses onto the GUI one.
             self._guard.on_quit(self._quit_requested.emit)
         self._check_double_tap_permission(self.cfg.hotkey)
-        if self.reset_listener is not None:
+        for attr, chord in (
+            ("reset_listener", self.cfg.reset_hotkey),
+            ("pause_listener", self.cfg.pause_hotkey),
+        ):
+            if getattr(self, attr) is None:
+                continue
             try:
-                self.reset_listener.start()
-                log.info("Reset hotkey listening on %s", self.cfg.reset_hotkey)
+                getattr(self, attr).start()
+                log.info("%s listening on %s", attr, chord)
             except Exception as exc:
                 # Not even worth a notification: dictation itself still works.
-                log.warning("Could not register reset hotkey %r: %s", self.cfg.reset_hotkey, exc)
-                self.reset_listener = None
+                log.warning("Could not register %s %r: %s", attr, chord, exc)
+                setattr(self, attr, None)
 
         def load():
             started = time.monotonic()
@@ -525,6 +540,8 @@ class PyWhisprApp(QObject):
         self.listener.stop()
         if self.reset_listener is not None:
             self.reset_listener.stop()
+        if self.pause_listener is not None:
+            self.pause_listener.stop()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
         try:
@@ -834,6 +851,7 @@ class PyWhisprApp(QObject):
                 log.exception("Could not open microphone")
                 self.tray.notify("Microphone error", str(exc))
                 return
+        self._paused = False
         self._set_state(State.RECORDING)
         self._hold_clipboard()
         if self.ducker.cue_lead_ms:
@@ -856,8 +874,13 @@ class PyWhisprApp(QObject):
 
     def _stop_recording(self) -> None:
         self._max_duration_timer.stop()
+        self._paused = False
         try:
             audio = self.recorder.stop()
+            before = len(audio)
+            audio = trim_silence(audio, self.cfg.trim_silence_seconds, self.cfg.silence_level)
+            if len(audio) != before:
+                log.info("Trimmed %.1fs of silence", (before - len(audio)) / SAMPLE_RATE)
         finally:
             # Even when PortAudio fails to close the stream, the other apps
             # must get their volume back — Windows would remember the ducked
@@ -899,15 +922,44 @@ class PyWhisprApp(QObject):
         except Exception:
             log.exception("Could not reset the recording")
             return
-        self._max_duration_timer.start()  # the clock starts again with the audio
+        if self._paused:
+            self._max_duration_left = self._max_duration_timer.interval()
+        else:
+            self._max_duration_timer.start()  # the clock starts again with the audio
         self._play("start.wav")
         self.overlay.show_status("Starting over…")
         self.tray.set_status("Recording… (started over)", active=True)
         QTimer.singleShot(RESET_FEEDBACK_MS, self._back_to_recording_overlay)
 
     def _back_to_recording_overlay(self) -> None:
-        if self.state == State.RECORDING:
+        if self.state != State.RECORDING:
+            return
+        if self._paused:
+            self.overlay.show_paused()
+        else:
             self.overlay.show_recording()
+
+    def _on_pause(self) -> None:
+        """Pause hotkey: stop capturing while the user thinks, or carry on.
+
+        Only RECORDING has anything to pause. Stopping while paused is the
+        dictation hotkey as usual, and transcribes what came before the pause.
+        The max-duration clock is about audio, so it stands still too.
+        """
+        if self.state != State.RECORDING:
+            log.debug("Pause ignored: %s", self.state.name)
+            return
+        self._paused = not self._paused
+        self.recorder.paused = self._paused
+        if self._paused:
+            self._max_duration_left = self._max_duration_timer.remainingTime()
+            self._max_duration_timer.stop()
+            self.tray.set_status("Paused", active=True)
+        else:
+            self._max_duration_timer.start(max(self._max_duration_left, 1))
+            self.tray.set_status("Recording…", active=True)
+        log.debug("Recording %s", "paused" if self._paused else "resumed")
+        self.overlay.show_paused(self._paused)
 
     def _hold_clipboard(self) -> None:
         """Without auto-paste, empty the clipboard so an early Cmd+V pastes nothing.
@@ -1356,7 +1408,9 @@ class PyWhisprApp(QObject):
         if new.hotkey != old.hotkey:
             self._register_hotkey(new.hotkey, old.hotkey)
         if new.reset_hotkey != old.reset_hotkey:
-            self._register_reset_hotkey(new.reset_hotkey)
+            self._register_side_hotkey("reset_listener", new.reset_hotkey, self._reset_requested)
+        if new.pause_hotkey != old.pause_hotkey:
+            self._register_side_hotkey("pause_listener", new.pause_hotkey, self._pause_requested)
         self._fillers = filler_words(new.extra_filler_words, new.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(new.voice_reset_phrases)
         # Restore first: a ducker thrown away while holding saved levels never
@@ -1402,23 +1456,26 @@ class PyWhisprApp(QObject):
             )
             self._resume_listeners()
 
-    def _register_reset_hotkey(self, chord: str) -> None:
-        """Rebuild the start-over listener. A failure only costs that hotkey."""
-        if self.reset_listener is not None:
-            self.reset_listener.stop()
-            self.reset_listener = None
+    def _side_listener(self, chord: str, emit):
+        """A start-over/pause listener, or None when unset or clashing with dictation."""
         if not chord or chord == self.cfg.hotkey:
-            return
+            return None
+        return create_hotkey_listener(chord, on_toggle=emit)
+
+    def _register_side_hotkey(self, attr: str, chord: str, signal) -> None:
+        """Rebuild the start-over or pause listener. A failure only costs that hotkey."""
+        if getattr(self, attr) is not None:
+            getattr(self, attr).stop()
+            setattr(self, attr, None)
         try:
-            self.reset_listener = create_hotkey_listener(
-                chord, on_toggle=self._reset_requested.emit
-            )
-            self.reset_listener.start()
-            log.info("Reset hotkey changed to %s", chord)
+            listener = self._side_listener(chord, signal.emit)
+            if listener is not None:
+                listener.start()
+                log.info("%s changed to %s", attr, chord)
+            setattr(self, attr, listener)
         except Exception as exc:
-            log.warning("Could not register reset hotkey %r: %s", chord, exc)
-            self.reset_listener = None
-            self.tray.notify("Start-over hotkey not changed", str(exc))
+            log.warning("Could not register %s %r: %s", attr, chord, exc)
+            self.tray.notify("Hotkey not changed", str(exc))
 
     def _edit_vocabulary(self) -> None:
         """Edit the custom vocabulary and apply it without a restart.

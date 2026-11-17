@@ -330,3 +330,19 @@ class TestAStoredNameIsNotStranded:
 
         with self._sounddevice():
             assert find_device("Yeti Stereo Microphone") is None
+
+
+def test_trim_silence_shortens_only_long_gaps():
+    import numpy as np
+
+    from pywhispr.audio import BLOCK_SIZE, SAMPLE_RATE, trim_silence
+
+    speech = np.full(SAMPLE_RATE, 0.1, dtype=np.float32)
+    short = np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1s: a full stop's pause
+    long = np.zeros(10 * SAMPLE_RATE, dtype=np.float32)  # thinking
+    audio = np.concatenate([speech, short, speech, long, speech])
+    out = trim_silence(audio, 2.0, 0.01)
+    assert len(out) == len(audio) - 8 * SAMPLE_RATE
+    assert out.dtype == np.float32
+    assert len(trim_silence(audio, 0, 0.01)) == len(audio)
+    assert len(trim_silence(audio[: BLOCK_SIZE - 1], 2.0, 0.01)) == BLOCK_SIZE - 1

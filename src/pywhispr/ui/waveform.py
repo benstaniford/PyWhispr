@@ -9,6 +9,9 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
 
 BAR_COUNT = 24
+PAUSE_FRACTION = 0.6  # height of the paused sign's two bars
+PAUSE_MS = 380  # edges-to-centre fade on pause; the same, outwards, on resume
+PAUSE_SOFTNESS = 0.25  # width of the fading front, as a fraction of the half-width
 BAR_COLOR = QColor(255, 255, 255, 230)
 IDLE_FRACTION = 0.08  # minimum bar height so silence still shows a pulse line
 
@@ -45,14 +48,39 @@ class WaveformWidget(QWidget):
         self._heights = [IDLE_FRACTION] * BAR_COUNT
         self._level = self._target_level = 0.0
         self._clock = 0.0
+        self._paused = False
+        self._fold = 0.0  # 0 = full meter, 1 = folded into the pause sign
         self._timer = QTimer(self)
         self._timer.setInterval(FRAME_MS)
         self._timer.timeout.connect(self._tick)
+
+    def set_paused(self, paused: bool) -> None:
+        """Fold the bars into a pause sign, or unfold them back into the meter.
+
+        The outer bars fade first and the front sweeps to the centre, leaving the
+        middle two, which settle at PAUSE_FRACTION; resuming plays it backwards.
+        """
+        self._paused = paused
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _visibility(self, i: int) -> float:
+        """0..1 opacity of bar ``i`` at the current point of the fold."""
+        mid = BAR_COUNT // 2
+        if i in (mid - 1, mid):
+            return 1.0
+        # 0 at the centre pair, 1 at the ends.
+        d = (abs(i - (BAR_COUNT - 1) / 2) - 0.5) / ((BAR_COUNT - 1) / 2 - 0.5)
+        p = self._fold * self._fold * (3 - 2 * self._fold)  # smoothstep ease
+        front = 1.0 - p * (1.0 + PAUSE_SOFTNESS)  # sweeps from past the edge inwards
+        return max(0.0, min(1.0, (front - d) / PAUSE_SOFTNESS + 1.0))
 
     def start(self) -> None:
         self._heights = [IDLE_FRACTION] * BAR_COUNT
         self._level = self._target_level = 0.0
         self._clock = 0.0
+        self._paused = False
+        self._fold = 0.0
         self._timer.start()
 
     def stop(self) -> None:
@@ -70,7 +98,15 @@ class WaveformWidget(QWidget):
             LEVEL_ATTACK if rising else LEVEL_RELEASE
         )
 
+        step = FRAME_MS / PAUSE_MS
+        self._fold = min(1.0, self._fold + step) if self._paused else max(0.0, self._fold - step)
+        mid = BAR_COUNT // 2
         for i in range(BAR_COUNT):
+            if self._fold > 0.0 and i in (mid - 1, mid):
+                # The pause sign's bars ease towards its height as the rest fold away.
+                target = self._heights[i] + (PAUSE_FRACTION - self._heights[i]) * self._fold
+                self._heights[i] += (target - self._heights[i]) * BAR_RELEASE
+                continue
             wobble = 1.0 + WOBBLE_DEPTH * math.sin(
                 self._clock * self._speeds[i] + self._phases[i]
             )
@@ -91,6 +127,12 @@ class WaveformWidget(QWidget):
         slot = w / BAR_COUNT
         bar_w = max(2.0, slot * 0.55)
         for i, frac in enumerate(self._heights):
+            alpha = self._visibility(i)
+            if alpha <= 0.0:
+                continue
+            color = QColor(BAR_COLOR)
+            color.setAlphaF(BAR_COLOR.alphaF() * alpha)
+            painter.setBrush(color)
             bar_h = max(bar_w, frac * h)
             x = i * slot + (slot - bar_w) / 2
             y = (h - bar_h) / 2

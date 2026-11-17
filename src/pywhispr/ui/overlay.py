@@ -126,6 +126,14 @@ class OverlayWindow(QWidget):
         self._move_to_bottom_center()
         self._show_on_top()
 
+    def show_paused(self, paused: bool = True) -> None:
+        """Fold the waveform's own bars into a pause sign (False unfolds them)."""
+        self.status_label.hide()
+        self.waveform.show()
+        self.waveform.set_paused(paused)
+        self._move_to_bottom_center()
+        self._show_on_top()
+
     def show_status(self, text: str) -> None:
         """Swap the waveform for a short status message (e.g. 'Transcribing…')."""
         self.waveform.stop()
