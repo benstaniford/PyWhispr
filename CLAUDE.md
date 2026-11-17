@@ -844,7 +844,15 @@ asks `gpu.py`: is a path *possible* here, is one *on*, turn it off.
   hotkey. Double-tap needs the **Input Monitoring** permission; chords don't.
 - pynput is used for both on Windows/Linux (fine there).
 - Accessibility is optional: without it, text goes to the clipboard instead of
-  auto-pasting.
+  auto-pasting. In that mode **the clipboard is emptied when a recording starts**
+  (`injector.hold_clipboard`), so a Cmd+V pressed before the transcript lands
+  pastes nothing rather than the previous clipboard. `_finish_cycle` gives it
+  back (`release_clipboard`) when no transcript replaced it — empty, failed, or
+  consumed by a plugin — but not if the user copied something new meanwhile.
+  Every format is snapshotted, not just text: clearing an image and never
+  returning it would be data loss we caused. The `isolated_app` fixture patches
+  `TextInjector._clipboard`, since a CLI python never has Accessibility and every
+  test recording would otherwise empty the developer's real clipboard.
 - The app owns recording state; listeners only report events (incl. the
   double-tap hold duration for push-to-talk), so state can't desync.
 

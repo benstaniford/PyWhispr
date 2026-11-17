@@ -47,6 +47,9 @@ def isolated_app(**config_kwargs):
         # Every recording start re-scans the audio hardware, which would cycle the
         # real PortAudio under a test that is about something else.
         patch("pywhispr.app.refresh_devices"),
+        # Without Accessibility (a CLI python never has it) every recording start
+        # empties the clipboard, and that must not be the developer's own.
+        patch("pywhispr.injector.TextInjector._clipboard"),
     ):
         recorder = recorder_cls.return_value
         recorder.recording = False
@@ -743,6 +746,41 @@ def test_empty_transcription_skips_insertion(app, qtbot):
         wait_for_worker(app, qtbot)
         insert.assert_not_called()
     assert app.state == State.IDLE
+
+
+class TestClipboardHold:
+    """Without auto-paste the clipboard is emptied for the dictation and only
+    given back when no transcript arrives to replace it."""
+
+    def _cycle(self, app, qtbot, transcript):
+        app._test_backend.transcribe.return_value = transcript
+        app._on_model_ready()
+        with (
+            patch.object(app.injector, "hold_clipboard") as hold,
+            patch.object(app.injector, "release_clipboard") as release,
+        ):
+            app._on_toggle()
+            hold.assert_called_once()
+            release.assert_not_called()  # not while recording
+            app._on_toggle()
+            wait_for_worker(app, qtbot)
+        return release
+
+    def test_empty_transcript_releases(self, app, qtbot):
+        release = self._cycle(app, qtbot, "   ")
+        release.assert_called_once()
+        assert app.state == State.IDLE
+
+    def test_failed_transcription_releases(self, app, qtbot):
+        app._test_backend.transcribe.side_effect = RuntimeError("boom")
+        release = self._cycle(app, qtbot, "")
+        release.assert_called_once()
+
+    def test_a_failing_hold_does_not_stop_the_recording(self, app):
+        app._on_model_ready()
+        with patch.object(app.injector, "hold_clipboard", side_effect=RuntimeError("no")):
+            app._on_toggle()
+        assert app.state == State.RECORDING
 
 
 def test_mic_error_stays_idle(app):

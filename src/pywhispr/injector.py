@@ -8,6 +8,12 @@ On macOS, synthesizing the paste keystroke requires the Accessibility
 permission. Without it we fall back to clipboard-only mode: the transcript is
 left on the clipboard (previous contents are NOT restored) and the user
 pastes manually.
+
+In that mode the user cannot see when the transcript has landed, so a Cmd+V
+pressed a moment too early pastes whatever was copied before. ``hold_clipboard``
+empties the clipboard when a recording starts, so an early paste pastes
+nothing, and ``release_clipboard`` puts the old contents back if the dictation
+ends without a transcript.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QMimeData, QObject, QTimer, Signal
 
 from pywhispr import richclip
 from pywhispr.platform_setup import check_macos_accessibility
@@ -39,6 +45,41 @@ class TextInjector(QObject):
         self._paste_delay_ms = paste_delay_ms
         self._restore_delay_ms = restore_delay_ms
         self._old_text: str | None = None
+        # Clipboard-only mode: what was on the clipboard before the recording
+        # emptied it, until a transcript replaces it or it is given back.
+        self._held: QMimeData | None = None
+
+    def hold_clipboard(self) -> None:
+        """Empty the clipboard for the length of a dictation. Main thread only.
+
+        Clipboard-only mode only: with auto-paste the user never presses Cmd+V,
+        and the paste sequence saves and restores the clipboard itself. Every
+        format is kept, not just text — clearing an image or a copied file and
+        then failing to give it back would be data loss of our own making.
+        """
+        if self._held is not None or self.can_auto_paste():
+            return
+        clipboard = self._clipboard()
+        self._held = _copy_mime(clipboard.mimeData())
+        clipboard.clear()
+        log.debug("Clipboard held for the dictation (%d formats)", len(self._held.formats()))
+
+    def release_clipboard(self) -> None:
+        """Give back what ``hold_clipboard`` took, if a transcript did not replace it.
+
+        Skipped when something new was copied in the meantime: that is the user's
+        latest clipboard, and putting an older one over it would lose it.
+        """
+        held, self._held = self._held, None
+        if held is None or not held.formats():
+            return
+        clipboard = self._clipboard()
+        current = clipboard.mimeData()
+        if current is not None and current.formats():
+            log.debug("Clipboard changed during the dictation; not restoring")
+            return
+        clipboard.setMimeData(held)
+        log.debug("Clipboard restored after a dictation with no transcript")
 
     def insert(self, text: str, rich: tuple[tuple[int, int, str], ...] = ()) -> None:
         """Paste ``text`` into whatever app has keyboard focus. Main thread only.
@@ -50,16 +91,20 @@ class TextInjector(QObject):
         HTML, or any platform where we cannot write it, gets the words: the emoji
         arrives as its name, which is exactly how Teams' own copy degrades.
         """
-        clipboard = self._clipboard()
-
         if not self.can_auto_paste():
             # Clipboard-only mode: the transcript must stay on the clipboard,
-            # so the previous contents are deliberately not saved/restored.
-            clipboard.setText(text)
+            # so the previous contents are deliberately not saved/restored —
+            # including whatever hold_clipboard was keeping.
+            self._held = None
+            self._clipboard().setText(text)
             log.info("Accessibility not granted: left %d chars on clipboard", len(text))
             self.finished.emit(False)
             return
 
+        # Accessibility granted mid-dictation: put the held clipboard back first,
+        # so the ordinary save/restore below preserves it rather than an empty one.
+        self.release_clipboard()
+        clipboard = self._clipboard()
         mime = clipboard.mimeData()
         # Only restore plain text; putting images/files back reliably is not
         # worth the complexity, so those are left overwritten.
@@ -115,3 +160,12 @@ class TextInjector(QObject):
             self._old_text = None
         log.debug("Insert sequence finished")
         self.finished.emit(True)
+
+
+def _copy_mime(source: QMimeData | None) -> QMimeData:
+    """A detached copy of every format. The clipboard's own object changes under us."""
+    copy = QMimeData()
+    if source is not None:
+        for fmt in source.formats():
+            copy.setData(fmt, source.data(fmt))
+    return copy
