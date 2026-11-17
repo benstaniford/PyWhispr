@@ -161,6 +161,36 @@ def display_name(name: str) -> str:
     return name
 
 
+def trim_silence(audio: np.ndarray, max_gap_s: float, level: float) -> np.ndarray:
+    """Shorten every quiet stretch longer than ``max_gap_s`` to ``max_gap_s``.
+
+    Half of the kept gap stays on each side, so the model still hears a pause
+    where it would put a full stop; only the long thinking stretches go, and with
+    them the time spent transcribing nothing. Works in ``BLOCK_SIZE`` frames, a
+    block quiet when its RMS is below ``level``. Either knob at 0 turns it off.
+    """
+    n = len(audio) // BLOCK_SIZE
+    max_gap = int(max_gap_s * SAMPLE_RATE / BLOCK_SIZE)
+    if max_gap <= 0 or level <= 0 or n <= max_gap:
+        return audio
+    frames = audio[: n * BLOCK_SIZE].reshape(n, BLOCK_SIZE)
+    quiet = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1)) < level
+    keep = np.ones(n, dtype=bool)
+    head = max_gap // 2
+    i = 0
+    while i < n:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and quiet[j]:
+            j += 1
+        if j - i > max_gap:
+            keep[i + head : j - (max_gap - head)] = False
+        i = j
+    return np.concatenate([frames[keep].ravel(), audio[n * BLOCK_SIZE :]])
+
+
 class AudioRecorder:
     """Records mono float32 audio at 16 kHz until stopped.
 
@@ -178,6 +208,10 @@ class AudioRecorder:
         self._on_level = on_level
         self._stream = None
         self._blocks: list[np.ndarray] = []
+        # While True the stream stays open but its blocks are dropped. Pausing
+        # never stops the stream: a stop/start pair is exactly what can wedge
+        # Core Audio (see stop()).
+        self.paused = False
         # Set when a stream would not stop in time. Its close is still blocked
         # inside Core Audio, holding PortAudio's locks, so no further call into
         # PortAudio — opening a stream, refreshing the device list — is safe.
@@ -195,10 +229,13 @@ class AudioRecorder:
         if self._stream is not None:
             raise RuntimeError("Already recording")
         self._blocks = []
+        self.paused = False
 
         def callback(indata, frames, time_info, status):
             if status:
                 log.warning("Audio input status: %s", status)
+            if self.paused:
+                return
             block = indata[:, 0].copy()
             self._blocks.append(block)
             if self._on_level is not None:

@@ -1455,8 +1455,8 @@ class TestHistoryRecall:
                 Config(play_sounds=False, api_enabled=False, offer_gpu_setup=False)
             )
         chords = [call.args[0] for call in make_listener.call_args_list]
-        # Dictation and reset register; the picker is a tray menu item.
-        assert chords == [Config().hotkey, Config().reset_hotkey]
+        # Dictation, reset and pause register; the picker is a tray menu item.
+        assert chords == [Config().hotkey, Config().reset_hotkey, Config().pause_hotkey]
         instance._worker.shutdown(wait=True)
 
 
@@ -1507,6 +1507,36 @@ class TestResetHotkey:
                 )
             assert instance.reset_listener is None
             instance._worker.shutdown(wait=True)
+
+
+class TestPauseHotkey:
+    def _recording(self, app):
+        app._on_model_ready()
+        app._on_toggle()
+        assert app.state == State.RECORDING
+
+    def test_toggles_and_keeps_recording(self, app):
+        self._recording(app)
+        app._on_pause()
+        assert app._paused and app._test_recorder.paused is True
+        assert not app._max_duration_timer.isActive()
+        app._on_pause()
+        assert not app._paused and app._test_recorder.paused is False
+        assert app._max_duration_timer.isActive()
+        app._test_recorder.stop.assert_not_called()
+
+    def test_ignored_when_not_recording(self, app):
+        app._on_model_ready()
+        app._on_pause()
+        assert not app._paused
+
+    def test_stopping_while_paused_transcribes(self, app):
+        self._recording(app)
+        app._on_pause()
+        app._on_toggle()
+        assert app.state != State.RECORDING
+        assert not app._paused
+        app._test_recorder.stop.assert_called_once()
 
 
 class TestVoiceReset:

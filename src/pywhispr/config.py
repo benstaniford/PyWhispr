@@ -26,6 +26,8 @@ DEFAULT_HOTKEY_OTHER = "<ctrl>+<alt>+<space>"
 # Same chord as dictation but with Backspace: "erase what I have said so far".
 DEFAULT_RESET_HOTKEY_MAC = "<cmd>+<shift>+<backspace>"
 DEFAULT_RESET_HOTKEY_OTHER = "<ctrl>+<alt>+<backspace>"
+DEFAULT_PAUSE_HOTKEY_MAC = "<cmd>+<alt>+p"
+DEFAULT_PAUSE_HOTKEY_OTHER = "<ctrl>+<alt>+p"
 
 
 def default_hotkey() -> str:
@@ -36,12 +38,19 @@ def default_reset_hotkey() -> str:
     return DEFAULT_RESET_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_RESET_HOTKEY_OTHER
 
 
+def default_pause_hotkey() -> str:
+    return DEFAULT_PAUSE_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_PAUSE_HOTKEY_OTHER
+
+
 @dataclass
 class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
     # Pressed mid-recording: drop what has been said so far and keep recording,
     # for when the sentence came out wrong. "" turns it off.
     reset_hotkey: str = dataclasses.field(default_factory=default_reset_hotkey)
+    # Pressed mid-recording: stop capturing until pressed again, so thinking time
+    # is not transcribed. The dictation hotkey still stops as usual. "" turns it off.
+    pause_hotkey: str = dataclasses.field(default_factory=default_pause_hotkey)
     # Which microphone. input_device_name is what the settings page writes and
     # what wins: PortAudio indices are positions in a list that renumbers when
     # any other device is unplugged. input_device (an index) is still honoured
@@ -76,6 +85,12 @@ class Config:
     # turns it off without deleting it. See directml.py.
     use_directml: bool | None = None
     max_recording_seconds: int = 120
+    # Quiet stretches longer than trim_silence_seconds are cut down to that length
+    # before transcription (half kept each side, so the model still hears the pause
+    # it punctuates on). A block counts as quiet below silence_level RMS (0..1);
+    # raise it for a noisy mic. 0 for either turns trimming off.
+    trim_silence_seconds: float = 2.0
+    silence_level: float = 0.01
     play_sounds: bool = True
     # Quieten everything else while recording and put it back when it stops.
     # duck_volume is a 0–1 fraction of the *current* level (the default 0 silences).
