@@ -1,0 +1,36 @@
+#!/bin/bash
+# `uv sync` plus the apple-intelligence extra (intent correction, intent.py).
+#
+# apple-fm-sdk is sdist-only and its build backend refuses to run unless
+# xcode-select points at a full Xcode 26 — but the build itself is `swift build`
+# against the macOS SDK, which the Command Line Tools ship too (FoundationModels
+# .framework included). So when only the CLT are installed, this answers the two
+# version checks with stand-ins for the duration of the build and lets the real
+# toolchain do the work. With a real Xcode selected it changes nothing.
+#
+# Extra arguments go to `uv sync` (e.g. --no-dev).
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+  echo "error: Apple Intelligence needs an Apple silicon Mac." >&2
+  exit 1
+fi
+
+if [[ "$(xcode-select -p 2>/dev/null)" == *CommandLineTools* ]]; then
+  shims=$(mktemp -d)
+  trap 'rm -rf "$shims"' EXIT
+  # The backend's check is a substring test for "CommandLineTools", so the
+  # stand-in only has to answer with a path that does not contain it.
+  printf '#!/bin/sh\necho /Library/Developer/CLT\n' >"$shims/xcode-select"
+  printf '#!/bin/sh\necho "Xcode 26.0"\n' >"$shims/xcodebuild"
+  chmod +x "$shims/xcode-select" "$shims/xcodebuild"
+  export PATH="$shims:$PATH"
+  echo "Command Line Tools only: building apple-fm-sdk without Xcode's version checks."
+fi
+
+# The built wheel is cached by uv, so later plain `uv run`s keep it (they sync
+# inexactly); a plain `uv sync` removes it again, and this puts it back.
+uv sync --extra apple-intelligence "$@"

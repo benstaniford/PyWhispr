@@ -21,7 +21,17 @@ def devices():
 
 
 @pytest.fixture
-def build(qapp, devices):
+def intent_available(monkeypatch):
+    """Never ask the real Apple model: what the page shows must not depend on
+    whether the developer's Mac has Apple Intelligence switched on."""
+    state = {"answer": (True, ""), "supported": True}
+    monkeypatch.setattr("pywhispr.intent.available", lambda: state["answer"])
+    monkeypatch.setattr("pywhispr.intent.supported", lambda *a, **k: state["supported"])
+    return state
+
+
+@pytest.fixture
+def build(qapp, devices, intent_available):
     dialogs = []
 
     def make(cfg=None, **actions):
@@ -106,6 +116,41 @@ class TestSaving:
         assert dialog._letters.isChecked()
         dialog._letters.setChecked(False)
         assert self._saved(dialog).letters_to_acronyms is False
+
+    def test_the_intent_toggles_round_trip(self, build):
+        dialog = build(Config(intent_enabled=False))
+        assert not dialog._intent.isChecked()
+        dialog._intent.setChecked(True)
+        dialog._intent_jobs["intent_formatting"].setChecked(True)
+        dialog._intent_jobs["intent_self_corrections"].setChecked(False)
+        saved = self._saved(dialog)
+        assert saved.intent_enabled is True
+        assert saved.intent_formatting is True
+        assert saved.intent_self_corrections is False
+        assert saved.intent_grammar is True  # untouched
+
+    def test_the_intent_jobs_follow_the_switch(self, build):
+        dialog = build(Config(intent_enabled=False))
+        assert not dialog._intent_jobs["intent_grammar"].isEnabled()
+        dialog._intent.setChecked(True)
+        assert all(box.isEnabled() for box in dialog._intent_jobs.values())
+
+    def test_intent_is_disabled_with_the_reason_when_unavailable(
+        self, build, intent_available
+    ):
+        intent_available["answer"] = (False, "Apple Intelligence is turned off")
+        dialog = build(Config(intent_enabled=True))
+        assert not dialog._intent.isEnabled()
+        assert "turned off" in dialog._intent.toolTip()
+        assert not any(box.isEnabled() for box in dialog._intent_jobs.values())
+        # A saved choice survives a visit on a day the model is not there.
+        assert self._saved(dialog).intent_enabled is True
+
+    def test_intent_says_macos_only_elsewhere(self, build, intent_available):
+        intent_available["supported"] = False
+        dialog = build()
+        assert not dialog._intent.isEnabled()
+        assert dialog._intent.toolTip() == "macOS only"
 
     def test_reset_phrases_are_a_comma_separated_list(self, build):
         dialog = build()

@@ -381,6 +381,63 @@ Saying "dash" already works — this is about not having to.
   model, and every guard in this section came from one contradicting a guess. TTS
   articulates more cleanly than a person, so it flatters the letter-joining path.
 
+## Intent correction (`intent.py`)
+
+Optional, macOS only: after Parakeet, Apple's on-device Foundation Models model
+(the Apple Intelligence one) edits the transcript — spoken self-corrections,
+grammar, spoken formatting, rephrasing, each its own config bool. Off by default.
+Apple silicon + macOS 26 + Apple Intelligence switched on; `intent.available()`
+says which is missing, in words the settings tooltip shows.
+
+- **`apple-fm-sdk` is an extra (`apple-intelligence`), not a dependency.** PyPI has
+  only its sdist, whose build backend refuses to run without a full Xcode 26 —
+  but the build is just `swift build`, and the Command Line Tools' macOS SDK has
+  `FoundationModels.framework`. `scripts/sync-apple-intelligence` stands in for
+  `xcode-select`/`xcodebuild` for the build and lets CLT do it; `uv lock` needs no
+  build at all. A plain `uv sync` *removes* the extra (sync is exact); `uv run` does
+  not. CI builds it on `macos-26` (the build also checks the host is macOS 26).
+- **Works from the ad-hoc-signed bundle**, no entitlement: verified with
+  `PyWhispr.app/Contents/MacOS/PyWhispr diagnose`, which runs one fixed sample edit.
+  The spec `collect_all`s the package (its ctypes bindings find
+  `lib/libFoundationModels.dylib` next to themselves) and skips it when absent.
+- **Placement: scratch → fillers → intent → vocab → numbers → acronyms → plugins →
+  join.** The model must not see "clear clear"; the vocabulary gets the last word
+  over the model's spellings; numbers/acronyms mop up what it left as words.
+- **Off the GUI thread.** A dictation runs it on the STT worker inside
+  `transcribe()` (scratch and fillers run there first, then again — as no-ops — in
+  `_on_transcribed`); the API runs it on its request thread. `correct()` does
+  `asyncio.run` per call with a fresh session, so it is reentrant. `respond()` is
+  genuinely async and cancellable, so `asyncio.wait_for` is the timeout.
+- **The hazard is the model answering instead of editing, and it is real**, not a
+  hypothetical: given the transcript as plain text it answered "What's the weather
+  tomorrow?", wrote the cat poem and told the joke. Two things fixed most of it —
+  the transcript framed as data in `<transcript>` tags, and a structured one-field
+  `@generable` reply (nowhere to put a preamble) — and the tripwire takes the rest.
+- **The tripwire is bounds, not a proof**, since a rewrite has no spans: length
+  ratio, no added line breaks without the formatting job, and **stray words**.
+  Without rephrasing, stray means "outside the longest common subsequence with what
+  was said" — new *or moved*. A set comparison was the first version and the model
+  beat it: "Send the report to Ben. Sorry. I mean send it to Sarah." came back with
+  the two names swapped, every word one that had been said. Rephrasing may reorder,
+  so it can only count never-said words, at a 50% share — it no longer catches an
+  answer that reuses the question's words. That is the price of that switch.
+- Measured on this model: 0.4–0.7 s per dictation, ~1–2 s cold. **"bullet point"
+  does not work** — with an example in the prompt it deleted the command words and
+  still produced no list, so the formatting job is documented as "new line" only.
+  A closed list of commands is the kind of thing this codebase does structurally
+  (`scratch.py`'s segment rule) if it is ever wanted reliably.
+- A failure of any kind is an ordinary outcome, not a bug: unavailable, guardrail
+  refusal, `DecodingFailureError` (seen on the cat poem), timeout — all return the
+  input with an INFO/WARNING line and no traceback. `_intended` wraps `_try_intent`
+  in a catch-all because an escape on the worker would report the dictation failed
+  and drop the transcript.
+- **Never log the transcript or the reply** — lengths, durations, job flag names.
+- Testing: `-m intent` runs the real model (skips when unavailable). Everything else
+  fakes the SDK with plain functions, never mocks — `correct` runs on the worker.
+  `test_settings_dialog`'s `build` patches `intent.available`, or what the page
+  shows would depend on the developer's own Apple Intelligence setting.
+  The probe harness in "Spoken letters" works here too, and is what found the swap.
+
 ## Custom vocabulary (`vocab.py` + `ui/vocab_dialog.py`)
 
 Parakeet takes no word list at decode time (`generate()` gets a mel and nothing

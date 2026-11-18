@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 import pywhispr
-from pywhispr import ducking, flavor
+from pywhispr import ducking, flavor, intent
 from pywhispr.audio import all_input_devices, display_name, input_devices, refresh_devices
 from pywhispr.config import Config
 
@@ -62,6 +62,11 @@ EDITED_FIELDS = (
     "vocabulary_fuzzy",
     "numbers_to_digits",
     "letters_to_acronyms",
+    "intent_enabled",
+    "intent_self_corrections",
+    "intent_grammar",
+    "intent_formatting",
+    "intent_rephrase",
     "voice_reset_phrases",
     "plugins_enabled",
     "plugin_actions_enabled",
@@ -255,6 +260,8 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Letters", self._letters)
 
+        self._add_intent_rows(form)
+
         self._reset_phrases = QLineEdit(", ".join(self.config.voice_reset_phrases))
         self._reset_phrases.setPlaceholderText("clear clear")
         form.addRow("Start-over phrases", self._reset_phrases)
@@ -317,6 +324,52 @@ class SettingsDialog(QDialog):
         holder.setLayout(files)
         form.addRow("Files", holder)
         return page
+
+    def _add_intent_rows(self, form: QFormLayout) -> None:
+        """The on-device model's switch and its four jobs, one row each.
+
+        Disabled rather than hidden where it cannot run, with the reason on the
+        tooltip — "turn Apple Intelligence on" is something the user can act on.
+        A choice already saved stays ticked while disabled, so opening this page
+        on a day the model is still downloading does not switch it off.
+        """
+        self._intent = self._check(
+            "Tidy dictation with Apple Intelligence (on this Mac)", "intent_enabled"
+        )
+        ok, reason = intent.available() if intent.supported() else (False, "macOS only")
+        self._intent.setEnabled(ok)
+        self._intent.setToolTip(
+            reason
+            or "Parakeet transcribes as usual, then Apple's on-device model edits the "
+            "text. Anything slow, refused or not recognisably an edit is pasted as "
+            "it was transcribed."
+        )
+        form.addRow("Intent", self._intent)
+        self._intent_jobs = {
+            "intent_self_corrections": self._check(
+                'Apply spoken corrections ("three, no actually four" → four)',
+                "intent_self_corrections",
+            ),
+            "intent_grammar": self._check(
+                "Fix grammar, punctuation and mis-heard words", "intent_grammar"
+            ),
+            "intent_formatting": self._check(
+                'Follow spoken formatting ("new line", "new paragraph")', "intent_formatting"
+            ),
+            "intent_rephrase": self._check(
+                "Allow rephrasing for clarity (changes the most)", "intent_rephrase"
+            ),
+        }
+        for box in self._intent_jobs.values():
+            form.addRow("", box)
+
+        def _sync(*_):
+            on = self._intent.isEnabled() and self._intent.isChecked()
+            for box in self._intent_jobs.values():
+                box.setEnabled(on)
+
+        self._intent.toggled.connect(_sync)
+        _sync()
 
     # -- helpers -------------------------------------------------------------
 
@@ -443,6 +496,9 @@ class SettingsDialog(QDialog):
         cfg.vocabulary_fuzzy = self._vocab_fuzzy.isChecked()
         cfg.numbers_to_digits = self._numbers.isChecked()
         cfg.letters_to_acronyms = self._letters.isChecked()
+        cfg.intent_enabled = self._intent.isChecked()
+        for field, box in self._intent_jobs.items():
+            setattr(cfg, field, box.isChecked())
         cfg.voice_reset_phrases = [
             phrase.strip() for phrase in self._reset_phrases.text().split(",") if phrase.strip()
         ]

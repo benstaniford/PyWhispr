@@ -123,6 +123,9 @@ the rest are typed once and left alone, which is why they are not on it.
 | `vocabulary_fuzzy` | `true` | Also correct a *near* miss on longer terms, not just spacing and capitalisation |
 | `numbers_to_digits` | `true` | Write [spoken numbers](#spoken-numbers) as digits — *one one eight zero* becomes `1180` |
 | `letters_to_acronyms` | `true` | Join [spoken letters and codes](#spoken-letters-and-codes) — *E P M one one eight zero* becomes `EPM-1180` |
+| `intent_enabled` | `false` | Let Apple's on-device model [tidy the transcript](#intent-correction-macos) (Apple silicon, macOS 26+, Apple Intelligence on) |
+| `intent_self_corrections` / `intent_grammar` / `intent_formatting` / `intent_rephrase` | `true` / `true` / `false` / `false` | What it may change — see [Intent correction](#intent-correction-macos) |
+| `intent_timeout_s` | `3.0` | Paste the transcript as it was if the model takes longer than this |
 | `plugins_enabled` | `true` | Run [plugins](#plugins) — a phrase you say and what happens when you say it |
 | `plugin_actions_enabled` | `true` | Let plugins do things as well as rewrite text. `false` keeps their text changes and stops anything reaching outside PyWhispr |
 | `plugins` | `{}` | Per-plugin settings, e.g. `[plugins.emoji]` with `enabled = false` |
@@ -315,6 +318,45 @@ acronym conventionally written with a space gets a hyphen too, so *ISO 9001*
 becomes `ISO-9001`. There is no rule that tells that apart from a ticket, so set
 `letters_to_acronyms = false`, or untick **Settings… → Text → Letters**, to turn
 it off.
+
+
+## Intent correction (macOS)
+
+Parakeet writes down exactly what you said, including the part you took back:
+*"Let's meet at three, no actually four"* arrives with both times in it. On an
+Apple silicon Mac with macOS 26 and Apple Intelligence switched on, PyWhispr can
+hand the transcript to Apple's on-device model (the one behind Apple
+Intelligence — nothing leaves the Mac) and paste its edit instead:
+*"Let's meet at four."* Off by default; **Settings… → Text → Intent**.
+
+Each job is its own switch, because each one widens what the model may change:
+
+- **Spoken corrections** (on) — *"no actually"*, *"sorry, I mean"*, false starts
+  and repeated words.
+- **Grammar** (on) — punctuation, capitals and obviously mis-heard words.
+- **Spoken formatting** (off) — *"new line"* and *"new paragraph"* work;
+  *"bullet point"* is unreliable with this model.
+- **Rephrasing** (off) — the most freedom, and the weakest safety check below.
+
+Transcription itself is unchanged, and every other pass — vocabulary, numbers,
+letters, plugins — still runs, after the model, so your vocabulary has the last
+word on spellings. It typically adds **0.4–0.7 s** to a dictation (about 1–2 s
+for the first one after a while).
+
+**It cannot lose what you said.** The transcript is pasted as Parakeet wrote it
+whenever the model is unavailable, refuses, takes longer than `intent_timeout_s`,
+or replies with something that does not look like an edit. That last check is
+there because a language model will sometimes *answer* a dictated question rather
+than edit it, or follow a dictated instruction, and once — measured — swapped the
+two names in *"send it to Ben, sorry, I mean Sarah"*. So, unless rephrasing is on,
+the reply must keep your words in the order you said them, with at most a few
+changed. Rephrasing has to allow new words and new order, so it can only check
+that most of the words are yours.
+
+Running from source, install the optional dependency with
+`./scripts/sync-apple-intelligence` (it works with the Command Line Tools alone;
+a plain `uv sync` removes it again). `pywhispr diagnose` reports whether the model
+is available and times one sample edit.
 
 
 ## Speed

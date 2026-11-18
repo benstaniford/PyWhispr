@@ -134,6 +134,17 @@ class Config:
     # "at 5 pm" are left alone; a run of letters on its own needs three of them.
     # See acronyms.py.
     letters_to_acronyms: bool = True
+    # Intent correction (Apple silicon Macs, macOS 26+, Apple Intelligence on): the
+    # on-device Apple model edits the transcript after Parakeet has written it. Off
+    # by default. The jobs widen what it may change, so each is its own switch;
+    # anything that fails, or does not look like an edit, or takes longer than
+    # intent_timeout_s, pastes the transcript as it was. See intent.py.
+    intent_enabled: bool = False
+    intent_self_corrections: bool = True
+    intent_grammar: bool = True
+    intent_formatting: bool = False
+    intent_rephrase: bool = False
+    intent_timeout_s: float = 3.0
     # Plugins: a phrase you say, and what happens when you say it (Settings… →
     # Advanced → Open folder…). plugins_enabled is the master switch;
     # plugin_actions_enabled leaves plugins able to rewrite text but stops them

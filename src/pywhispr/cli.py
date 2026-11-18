@@ -349,6 +349,33 @@ def _cmd_verify_gpu(quantization: str | None = None) -> int:
     return 0
 
 
+def _diagnose_intent() -> None:
+    """Report the optional on-device model; never fails the diagnosis.
+
+    A fixed sentence, not anything the user said, so the result is safe to print.
+    """
+    import time
+
+    from pywhispr import intent
+
+    if not intent.supported():
+        return
+    print("\n--- intent correction (Apple Intelligence) ---")
+    ok, reason = intent.available()
+    if not ok:
+        print(f"unavailable: {reason}")
+        return
+    sample = "Let's meet at three, no actually four."
+    started = time.monotonic()
+    try:
+        edited = intent.correct(sample, intent.Jobs(), timeout_s=10)
+    except Exception as exc:
+        print(f"FAILED: {type(exc).__name__}: {exc}")
+        return
+    verdict = "ok" if intent.is_plausible_edit(sample, edited, intent.Jobs()) else "REJECTED"
+    print(f"{verdict} in {time.monotonic() - started:.2f}s: {sample!r} -> {edited!r}")
+
+
 def _cmd_diagnose() -> int:
     """Everything a bug report needs, in one console-visible run.
 
@@ -393,6 +420,8 @@ def _cmd_diagnose() -> int:
         print(f"FAILED: {type(exc).__name__}: {exc}")
         return 1
     print(f"ok in {time.monotonic() - started:.1f}s (result: {text!r})")
+
+    _diagnose_intent()
 
     print(f"\nAll checks passed. Log: {log_path()}")
     return 0

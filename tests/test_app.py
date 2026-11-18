@@ -513,6 +513,130 @@ class TestSpokenLetters:
         assert app._api_transcribe(audio) == "Assign EPM-1180 to me."
 
 
+class TestIntentCorrection:
+    """The on-device model's pass: where it sits, and that it can never lose words.
+
+    The model is replaced by plain functions, never mocks: the pass runs on the STT
+    worker, and a mock reached off the main thread is what hung this suite before.
+    """
+
+    @pytest.fixture
+    def model(self, monkeypatch):
+        """A stand-in model. Set ``.reply`` (a function of the text) or ``.error``."""
+        state = SimpleNamespace(
+            reply=lambda text: text, error=None, available=(True, ""), calls=[]
+        )
+
+        def correct(text, jobs, timeout_s):
+            state.calls.append((text, jobs, timeout_s))
+            if state.error is not None:
+                raise state.error
+            return state.reply(text)
+
+        monkeypatch.setattr("pywhispr.intent.correct", correct)
+        monkeypatch.setattr("pywhispr.intent.available", lambda: state.available)
+        return state
+
+    def _dictate(self, app, qtbot, text):
+        app.cfg.intent_enabled = True
+        app._on_model_ready()
+        app._on_toggle()  # start
+        app._test_backend.transcribe.return_value = text
+        with patch.object(app.injector, "insert") as insert:
+            app._on_toggle()  # stop → transcribe
+            wait_for_worker(app, qtbot)
+        return insert
+
+    def test_the_edit_is_pasted(self, app, qtbot, model):
+        model.reply = lambda text: "Let's meet at four."
+        insert = self._dictate(app, qtbot, "Let's meet at three, no actually four.")
+        insert.assert_called_once_with("Let's meet at four.", ())
+
+    def test_off_by_default(self, qapp, qtbot, model):
+        with isolated_app() as (app, _tray):
+            app._on_model_ready()
+            app._on_toggle()
+            app._test_backend.transcribe.return_value = "Some words."
+            with patch.object(app.injector, "insert") as insert:
+                app._on_toggle()
+                wait_for_worker(app, qtbot)
+        insert.assert_called_once_with("Some words.", ())
+        assert model.calls == []
+
+    def test_the_model_never_sees_the_start_over_phrase_or_fillers(self, app, qtbot, model):
+        self._dictate(app, qtbot, "Book the room. Clear clear, um, book the hall.")
+        (seen, _jobs, _timeout), = model.calls
+        assert "clear" not in seen.lower()
+        assert "um" not in seen.split()
+
+    def test_runs_before_the_vocabulary(self, app, qtbot, model):
+        """The user's own spellings get the last word over the model's."""
+        app._vocab = parse_vocabulary("beyond trust => BeyondTrust")
+        model.reply = lambda text: "Ask beyond trust about it."
+        insert = self._dictate(app, qtbot, "Ask beyond trust about it.")
+        insert.assert_called_once_with("Ask BeyondTrust about it.", ())
+
+    def test_runs_before_the_numbers(self, app, qtbot, model):
+        model.reply = lambda text: "The port is nine one four nine."
+        insert = self._dictate(app, qtbot, "The port is, no, the port is nine one four nine.")
+        insert.assert_called_once_with("The port is 9149.", ())
+
+    def test_the_jobs_and_timeout_come_from_config(self, app, qtbot, model):
+        app.cfg.intent_rephrase = True
+        app.cfg.intent_grammar = False
+        app.cfg.intent_timeout_s = 1.5
+        self._dictate(app, qtbot, "Some words here.")
+        (_text, jobs, timeout), = model.calls
+        assert jobs.rephrase and not jobs.grammar
+        assert timeout == 1.5
+
+    def test_no_jobs_means_no_call(self, app, qtbot, model):
+        for field in ("self_corrections", "grammar", "formatting", "rephrase"):
+            setattr(app.cfg, f"intent_{field}", False)
+        insert = self._dictate(app, qtbot, "Some words here.")
+        insert.assert_called_once_with("Some words here.", ())
+        assert model.calls == []
+
+    def test_unavailable_pastes_the_transcript(self, app, qtbot, model):
+        model.available = (False, "Apple Intelligence is turned off")
+        insert = self._dictate(app, qtbot, "Some words here.")
+        insert.assert_called_once_with("Some words here.", ())
+        assert model.calls == []
+
+    @pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("refused")])
+    def test_a_failure_pastes_the_transcript(self, app, qtbot, model, error):
+        model.error = error
+        insert = self._dictate(app, qtbot, "Some words here.")
+        insert.assert_called_once_with("Some words here.", ())
+        assert app.state == State.INSERTING
+
+    def test_an_answer_is_rejected_by_the_tripwire(self, app, qtbot, model):
+        model.reply = lambda text: "Why don't scientists trust atoms? They make up everything!"
+        insert = self._dictate(app, qtbot, "Tell me a joke.")
+        insert.assert_called_once_with("Tell me a joke.", ())
+
+    def test_a_broken_pass_never_loses_the_transcript(self, app, qtbot, model, monkeypatch):
+        def broken(*args):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("pywhispr.intent.is_plausible_edit", broken)
+        model.reply = lambda text: "Edited words here."
+        insert = self._dictate(app, qtbot, "Some words here.")
+        insert.assert_called_once_with("Some words here.", ())
+
+    def test_the_overlay_says_what_is_happening(self, app, qtbot, model):
+        with patch.object(app.overlay, "show_status") as show_status:
+            self._dictate(app, qtbot, "Some words here.")
+        assert ("Tidying…",) in [c.args for c in show_status.call_args_list]
+
+    def test_the_api_gets_it_too(self, app, model):
+        app.cfg.intent_enabled = True
+        model.reply = lambda text: "Meet at four."
+        app._test_backend.transcribe.return_value = "Meet at three, no, four."
+        audio = np.zeros(16000, dtype=np.float32)
+        assert app._api_transcribe(audio) == "Meet at four."
+
+
 class TestPlugins:
     """Where the plugin pass sits, and when a plugin's action is allowed to run."""
 

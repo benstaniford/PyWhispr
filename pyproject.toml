@@ -26,6 +26,16 @@ dependencies = [
     "pycaw>=20240210 ; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# Intent correction (intent.py): Apple's Python bindings for the Foundation Models
+# framework. An extra, not a dependency, because PyPI has only its sdist and that
+# insists on a full Xcode 26 to build — a plain `uv sync` must keep working
+# without one. `scripts/sync-apple-intelligence` installs it with the Command Line
+# Tools alone; the release workflow builds it on a runner that has Xcode.
+apple-intelligence = [
+    "apple-fm-sdk>=0.2.2 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 [project.scripts]
 pywhispr = "pywhispr.cli:main"
 
@@ -45,8 +55,9 @@ constraint-dependencies = ["numba>=0.61"]
 testpaths = ["tests"]
 markers = [
     "model: tests that download and run the real STT model (deselect with '-m \"not model\"')",
+    "intent: tests that run Apple's on-device model (needs the apple-intelligence extra)",
 ]
-addopts = "-m 'not model'"
+addopts = "-m 'not model and not intent'"
 
 [tool.ruff]
 line-length = 100

@@ -26,6 +26,20 @@ for pkg in ("mlx", "parakeet_mlx", "librosa"):
     binaries += b
     hiddenimports += h
 
+# Intent correction (intent.py) imports apple_fm_sdk lazily, and its ctypes
+# bindings find libFoundationModels.dylib in the package's own lib/ directory, so
+# the package goes in whole. Optional: a build without the apple-intelligence
+# extra simply ships without the feature, and the settings page says so.
+import importlib.util
+
+if importlib.util.find_spec("apple_fm_sdk") is not None:
+    d, b, h = collect_all("apple_fm_sdk")
+    datas += d
+    binaries += b
+    hiddenimports += h + ["pywhispr.intent"]
+else:
+    print("apple_fm_sdk not installed: building without intent correction")
+
 # PyInstaller relocates the loaded libmlx.dylib to the Frameworks root, but
 # libmlx locates mlx.metallib via dladdr in its own directory — so the
 # metallib needs a copy at the root as well.

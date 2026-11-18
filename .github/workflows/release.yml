@@ -10,7 +10,9 @@ permissions:
 jobs:
   macos-app:
     name: Build macOS app (arm64)
-    runs-on: macos-latest
+    # macOS 26 named, not macos-latest: apple-fm-sdk (intent correction) is built
+    # from source here, and its build refuses to run on anything older.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +20,9 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync --no-dev
+        # The apple-intelligence extra, via the script that also copes with a
+        # Command Line Tools-only toolchain; with Xcode selected it is a plain sync.
+        run: ./scripts/sync-apple-intelligence --no-dev
 
       - name: Build app bundle
         run: uv run --with pyinstaller pyinstaller packaging/pywhispr.spec --noconfirm

@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
-from pywhispr import flavor, gpu
+from pywhispr import flavor, gpu, intent
 from pywhispr.acronyms import is_acronym_substitution, to_acronyms
 from pywhispr.api import QUEUE_TIMEOUT_SECONDS, TranscriptionServer
 from pywhispr.audio import (
@@ -94,6 +94,7 @@ class PyWhisprApp(QObject):
     _model_ready = Signal()
     _model_failed = Signal(str)
     _transcribed = Signal(str)
+    _tidying = Signal()  # the worker is handing the transcript to the intent model
     _transcribe_failed = Signal(str)
     _quit_requested = Signal()  # another process (an installer) asked us to exit
 
@@ -213,6 +214,7 @@ class PyWhisprApp(QObject):
         self._model_ready.connect(self._on_model_ready)
         self._model_failed.connect(self._on_model_failed)
         self._transcribed.connect(self._on_transcribed)
+        self._tidying.connect(self._on_tidying)
         self._transcribe_failed.connect(self._on_transcribe_failed)
         self.injector.finished.connect(self._on_insert_finished)
 
@@ -631,7 +633,9 @@ class PyWhisprApp(QObject):
             timeout=QUEUE_TIMEOUT_SECONDS + len(audio) / SAMPLE_RATE
         )
         corrected = self._acronyms(
-            self._numbered(self._corrected(self._cleaned(self._after_reset(text))))
+            self._numbered(
+                self._corrected(self._intended(self._cleaned(self._after_reset(text))))
+            )
         )
         return self._via_plugins(corrected, collect_actions=False)
 
@@ -900,6 +904,14 @@ class PyWhisprApp(QObject):
             try:
                 text = self.backend.transcribe(audio)
                 log.info("Transcription took %.1fs", time.monotonic() - started)
+                if self.cfg.intent_enabled:
+                    # Here, on the worker, because the model takes a few hundred
+                    # milliseconds that the GUI thread must not spend. The voice
+                    # reset and the fillers go first — the model must not see
+                    # "clear clear" — and run again, as no-ops, in _on_transcribed.
+                    text = self._intended(
+                        self._cleaned(self._after_reset(text)), announce=True
+                    )
                 self._transcribed.emit(text)
             except Exception as exc:
                 log.exception("Transcription failed")
@@ -1071,6 +1083,83 @@ class PyWhisprApp(QObject):
             )
             return text
         return cleaned
+
+    def _intended(self, text: str, *, announce: bool = False) -> str:
+        """Let the on-device model tidy the transcript, degrading to it untouched.
+
+        Runs off the GUI thread — the STT worker for a dictation, a request thread
+        for the API — so it touches nothing on ``self`` but config and signals.
+        After the voice reset and the fillers, before the vocabulary: the user's
+        own spellings get the last word over the model's, and numbers, acronyms
+        and plugins mop up whatever it left as words. ``announce`` puts "Tidying…"
+        on the overlay, for a local dictation only.
+
+        Every failure — unavailable, refused, timed out, or a reply that does not
+        look like an edit of what was said — returns ``text``: the audio is gone,
+        and the transcript without the edit is still what the user said.
+        """
+        if not text.strip() or not self.cfg.intent_enabled:
+            return text
+        try:
+            return self._try_intent(text, announce)
+        except Exception:
+            # Unreachable by design — everything below handles its own failures —
+            # but on the worker an escape would report the dictation as failed and
+            # throw the transcript away.
+            log.exception("Intent correction pass failed; using the transcript as it was")
+            return text
+
+    def _try_intent(self, text: str, announce: bool) -> str:
+        jobs = intent.Jobs.from_config(self.cfg)
+        if not jobs.any():
+            return text
+        ok, reason = intent.available()
+        if not ok:
+            log.info("Intent correction skipped: %s", reason)
+            return text
+        if announce:
+            self._tidying.emit()
+        started = time.monotonic()
+        try:
+            edited = intent.correct(text, jobs, self.cfg.intent_timeout_s)
+        except TimeoutError:
+            log.warning(
+                "Intent correction took longer than %.1fs; using the transcript as it was",
+                self.cfg.intent_timeout_s,
+            )
+            return text
+        except Exception as exc:
+            # A guardrail refusal or a reply that would not decode is an ordinary
+            # answer from the model, not a bug, so no traceback for those.
+            log.info(
+                "Intent correction failed (%s); using the transcript as it was",
+                type(exc).__name__,
+            )
+            log.debug("Intent correction failure", exc_info=True)
+            return text
+        took = time.monotonic() - started
+        if not intent.is_plausible_edit(text, edited, jobs):
+            log.warning(
+                "Intent correction gave %d characters from %d that do not look like an "
+                "edit (jobs %s); using the transcript as it was",
+                len(edited),
+                len(text),
+                jobs.describe(),
+            )
+            return text
+        log.info(
+            "Intent correction took %.2fs: %d characters to %d (jobs %s)",
+            took,
+            len(text),
+            len(edited),
+            jobs.describe(),
+        )
+        return edited
+
+    def _on_tidying(self) -> None:
+        if self.state == State.TRANSCRIBING:
+            self.overlay.show_status("Tidying…")
+            self.tray.set_status("Tidying…")
 
     def _corrected(self, text: str) -> str:
         """Apply the user's vocabulary to a finished transcript.
