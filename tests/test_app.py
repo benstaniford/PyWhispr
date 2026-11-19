@@ -1402,7 +1402,8 @@ class TestAudioDucking:
     def test_replacing_the_ducker_restores_the_old_one_first(self, app):
         # A ducker thrown away while holding saved levels never gives them back.
         ducker = self._ducked(app)
-        app._apply_settings(dataclasses.replace(app.cfg, duck_other_audio=False))
+        with patch("pywhispr.app.save_config"):
+            app._apply_settings(dataclasses.replace(app.cfg, duck_other_audio=False))
         ducker.restore.assert_called_once()
         assert app.ducker is not ducker
 
