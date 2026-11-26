@@ -28,10 +28,6 @@ DEFAULT_RESET_HOTKEY_MAC = "<cmd>+<shift>+<backspace>"
 DEFAULT_RESET_HOTKEY_OTHER = "<ctrl>+<alt>+<backspace>"
 DEFAULT_PAUSE_HOTKEY_MAC = "<cmd>+<alt>+p"
 DEFAULT_PAUSE_HOTKEY_OTHER = "<ctrl>+<alt>+p"
-# Not the obvious Ctrl+Alt+V / Cmd+Shift+V: those are Office's Paste Special and
-# the Mac's Paste and Match Style, and a global hotkey would steal them.
-DEFAULT_REPASTE_HOTKEY_MAC = "<ctrl>+<cmd>+v"
-DEFAULT_REPASTE_HOTKEY_OTHER = "<ctrl>+<alt>+<shift>+v"
 
 
 def default_hotkey() -> str:
@@ -46,10 +42,6 @@ def default_pause_hotkey() -> str:
     return DEFAULT_PAUSE_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_PAUSE_HOTKEY_OTHER
 
 
-def default_repaste_hotkey() -> str:
-    return DEFAULT_REPASTE_HOTKEY_MAC if sys.platform == "darwin" else DEFAULT_REPASTE_HOTKEY_OTHER
-
-
 @dataclass
 class Config:
     hotkey: str = dataclasses.field(default_factory=default_hotkey)
@@ -60,8 +52,9 @@ class Config:
     # is not transcribed. The dictation hotkey still stops as usual. "" turns it off.
     pause_hotkey: str = dataclasses.field(default_factory=default_pause_hotkey)
     # Pressed while idle: paste the last dictation again at the caret, for one that
-    # went to a window without the focus. "" turns it off.
-    repaste_hotkey: str = dataclasses.field(default_factory=default_repaste_hotkey)
+    # went to a window without the focus. Unbound by default: every global hotkey
+    # steals that chord from every other app, so it is opt-in from Settings.
+    repaste_hotkey: str = ""
     # Which microphone. input_device_name is what the settings page writes and
     # what wins: PortAudio indices are positions in a list that renumbers when
     # any other device is unplugged. input_device (an index) is still honoured

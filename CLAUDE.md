@@ -154,9 +154,9 @@ are kept **in memory only** and a tray menu entry opens a picker that pastes the
 chosen one at the current caret. The common case — the dictation *just* went
 nowhere — has `repaste_hotkey`, which pastes the newest entry with no picker.
 
-- **The repaste default is not Ctrl+Alt+V / Cmd+Shift+V**, the obvious ones: they
-  are Office's Paste Special and the Mac's Paste and Match Style, and a global
-  hotkey steals them everywhere. `Ctrl+Alt+Shift+V` / `Ctrl+Cmd+V`.
+- **`repaste_hotkey` is unbound by default** — a global hotkey steals its chord
+  from every app, so it is opt-in from Settings. The obvious Ctrl+Alt+V /
+  Cmd+Shift+V are Office's Paste Special and the Mac's Paste and Match Style.
 - **It waits for the chord's modifiers to come up** (`_paste_when_released`,
   `QGuiApplication.queryKeyboardModifiers`, which reads the real key state
   globally). The hotkey fires on press, and a synthetic Ctrl+V under a held

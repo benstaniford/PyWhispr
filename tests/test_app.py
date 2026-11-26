@@ -1602,8 +1602,8 @@ class TestHistoryRecall:
         choose.assert_not_called()
         assert app.state == State.RECORDING
 
-    def test_only_the_repaste_hotkey_is_added(self, qtbot, qapp):
-        """The picker is a tray menu item; repaste is the one recall hotkey."""
+    def test_repaste_hotkey_is_unbound_by_default(self, qtbot, qapp):
+        """The picker is a tray menu item; repaste registers only once bound."""
         from pywhispr.app import PyWhisprApp
         from pywhispr.config import Config
 
@@ -1619,7 +1619,8 @@ class TestHistoryRecall:
             )
         chords = [call.args[0] for call in make_listener.call_args_list]
         c = Config()
-        assert chords == [c.hotkey, c.reset_hotkey, c.pause_hotkey, c.repaste_hotkey]
+        assert c.repaste_hotkey == ""
+        assert chords == [c.hotkey, c.reset_hotkey, c.pause_hotkey]
         instance._worker.shutdown(wait=True)
 
     def test_repaste_waits_for_the_chord_then_pastes_the_newest(self, app, qtbot):
