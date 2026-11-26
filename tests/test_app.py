@@ -1602,8 +1602,8 @@ class TestHistoryRecall:
         choose.assert_not_called()
         assert app.state == State.RECORDING
 
-    def test_recall_claims_no_hotkey_of_its_own(self, qtbot, qapp):
-        """The picker is a tray menu item; only dictation registers a hotkey."""
+    def test_repaste_hotkey_is_unbound_by_default(self, qtbot, qapp):
+        """The picker is a tray menu item; repaste registers only once bound."""
         from pywhispr.app import PyWhisprApp
         from pywhispr.config import Config
 
@@ -1618,9 +1618,50 @@ class TestHistoryRecall:
                 Config(play_sounds=False, api_enabled=False, offer_gpu_setup=False)
             )
         chords = [call.args[0] for call in make_listener.call_args_list]
-        # Dictation, reset and pause register; the picker is a tray menu item.
-        assert chords == [Config().hotkey, Config().reset_hotkey, Config().pause_hotkey]
+        c = Config()
+        assert c.repaste_hotkey == ""
+        assert chords == [c.hotkey, c.reset_hotkey, c.pause_hotkey]
         instance._worker.shutdown(wait=True)
+
+    def test_repaste_waits_for_the_chord_then_pastes_the_newest(self, app, qtbot):
+        from PySide6.QtCore import Qt
+
+        self._ready(app)
+        self._dictate(app, qtbot, "older")
+        self._dictate(app, qtbot, "the lost sentence")
+        held = [Qt.KeyboardModifier.AltModifier]
+        with (
+            patch(
+                "pywhispr.app.QGuiApplication.queryKeyboardModifiers",
+                side_effect=lambda: held[0],
+            ),
+            patch.object(app.injector, "insert") as insert,
+        ):
+            app._on_repaste()
+            assert app.state == State.INSERTING
+            qtbot.wait(80)
+            insert.assert_not_called()  # Alt still down: Ctrl+V would be Ctrl+Alt+V
+            held[0] = Qt.KeyboardModifier.NoModifier
+            qtbot.waitUntil(lambda: insert.called, timeout=1000)
+            insert.assert_called_once_with("the lost sentence")
+        app.injector.finished.emit(True)
+        assert app.state == State.IDLE
+
+    def test_repaste_refused_while_recording_or_in_a_dialog(self, app, qtbot):
+        self._ready(app)
+        self._dictate(app, qtbot, "the lost sentence")
+        with patch("pywhispr.app.QApplication.activeModalWidget", return_value=object()):
+            app._on_repaste()
+        assert app.state == State.IDLE
+        app._on_toggle()  # recording
+        app._on_repaste()
+        assert app.state == State.RECORDING
+
+    def test_repaste_with_empty_history_only_notifies(self, app):
+        self._ready(app)
+        app._on_repaste()
+        assert app.state == State.IDLE
+        app.tray.notify.assert_called()
 
 
 class TestResetHotkey:

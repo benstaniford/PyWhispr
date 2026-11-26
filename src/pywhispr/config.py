@@ -51,6 +51,10 @@ class Config:
     # Pressed mid-recording: stop capturing until pressed again, so thinking time
     # is not transcribed. The dictation hotkey still stops as usual. "" turns it off.
     pause_hotkey: str = dataclasses.field(default_factory=default_pause_hotkey)
+    # Pressed while idle: paste the last dictation again at the caret, for one that
+    # went to a window without the focus. Unbound by default: every global hotkey
+    # steals that chord from every other app, so it is opt-in from Settings.
+    repaste_hotkey: str = ""
     # Which microphone. input_device_name is what the settings page writes and
     # what wins: PortAudio indices are positions in a list that renumbers when
     # any other device is unplugged. input_device (an index) is still honoured

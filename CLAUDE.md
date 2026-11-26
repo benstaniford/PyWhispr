@@ -151,9 +151,18 @@ preference lives on the page. `tray.py` keeps `open_config`/`open_log` because
 Auto-paste follows the focus, so a dictation aimed at a box that had lost focus
 is lost outright — the audio is gone. The last `HISTORY_SIZE` (10) transcripts
 are kept **in memory only** and a tray menu entry opens a picker that pastes the
-chosen one at the current caret. **No hotkey of its own** — a second global
-shortcut is a real cost (it can clash, it needs registering, it needs a config
-key and a failure path) for something reached once in a while.
+chosen one at the current caret. The common case — the dictation *just* went
+nowhere — has `repaste_hotkey`, which pastes the newest entry with no picker.
+
+- **`repaste_hotkey` is unbound by default** — a global hotkey steals its chord
+  from every app, so it is opt-in from Settings. The obvious Ctrl+Alt+V /
+  Cmd+Shift+V are Office's Paste Special and the Mac's Paste and Match Style.
+- **It waits for the chord's modifiers to come up** (`_paste_when_released`,
+  `QGuiApplication.queryKeyboardModifiers`, which reads the real key state
+  globally). The hotkey fires on press, and a synthetic Ctrl+V under a held
+  Alt+Shift arrives as Ctrl+Alt+Shift+V. Capped at `RELEASE_WAIT_MS`.
+- Its listener is never stopped around a dialog, like reset/pause, but unlike them
+  it acts while IDLE — so `_on_repaste` refuses while `activeModalWidget()` is set.
 
 - What is remembered is the **corrected** transcript, *before* `join_text`: the
   join belongs to the caret that dictation was aimed at, and re-pasting later
