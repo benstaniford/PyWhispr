@@ -148,8 +148,11 @@ has a **copy button** that puts that transcript on the clipboard and leaves the
 picker open. The picker takes the focus while it is open, so the window that had
 it is given it back before the paste goes out.
 
-There is no recall hotkey — the tray menu is the only way in, so the feature costs
-no keyboard shortcut.
+For the usual case — the one you just dictated went nowhere — click where it
+should have gone and press the **paste-again hotkey**: **Ctrl+Alt+Shift+V**
+(**Ctrl+Cmd+V** on a Mac). It pastes the newest transcript, no picker. Change it
+or turn it off under **Settings… → Dictation → Paste-again hotkey**
+(`repaste_hotkey`, `""` for off).
 
 The transcripts are **never written to disk** — they live in memory, capped at ten,
 and go when the app does.

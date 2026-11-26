@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum, auto
 from importlib.resources import files
 
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication
 
@@ -55,6 +56,11 @@ PUSH_TO_TALK_HOLD_SECONDS = 0.35
 # After the history picker closes, how long the previously focused window is
 # given to take the focus back before the paste keystroke goes out.
 FOCUS_RESTORE_MS = 150
+# The repaste hotkey fires while its modifiers are still down, and a synthetic
+# Ctrl+V under a held Alt+Shift arrives as Ctrl+Alt+Shift+V. So the paste waits
+# for the keys to come up, polling, and goes anyway after the cap.
+RELEASE_POLL_MS = 20
+RELEASE_WAIT_MS = 2000
 
 # How long "Starting over…" replaces the waveform after the reset hotkey.
 RESET_FEEDBACK_MS = 700
@@ -90,6 +96,7 @@ class PyWhisprApp(QObject):
     _reset_requested = Signal()
     _pause_requested = Signal()
     _history_requested = Signal()
+    _repaste_requested = Signal()
     _mic_level = Signal(float)
     _model_ready = Signal()
     _model_failed = Signal(str)
@@ -171,6 +178,11 @@ class PyWhisprApp(QObject):
         # The pause one is the same shape for the same reason.
         self.reset_listener = self._side_listener(cfg.reset_hotkey, self._reset_requested.emit)
         self.pause_listener = self._side_listener(cfg.pause_hotkey, self._pause_requested.emit)
+        # Also never stopped around a dialog, though it does act while IDLE:
+        # _on_repaste refuses while a modal is open instead.
+        self.repaste_listener = self._side_listener(
+            cfg.repaste_hotkey, self._repaste_requested.emit
+        )
         # Paused mid-recording: the stream stays open and drops its blocks. Kept
         # here rather than read off the recorder — the app owns recording state.
         self._paused = False
@@ -210,6 +222,7 @@ class PyWhisprApp(QObject):
         self._reset_requested.connect(self._on_reset)
         self._pause_requested.connect(self._on_pause)
         self._history_requested.connect(self._show_history)
+        self._repaste_requested.connect(self._on_repaste)
         self._mic_level.connect(self.overlay.on_level)
         self._model_ready.connect(self._on_model_ready)
         self._model_failed.connect(self._on_model_failed)
@@ -262,6 +275,7 @@ class PyWhisprApp(QObject):
         for attr, chord in (
             ("reset_listener", self.cfg.reset_hotkey),
             ("pause_listener", self.cfg.pause_hotkey),
+            ("repaste_listener", self.cfg.repaste_hotkey),
         ):
             if getattr(self, attr) is None:
                 continue
@@ -544,6 +558,8 @@ class PyWhisprApp(QObject):
             self.reset_listener.stop()
         if self.pause_listener is not None:
             self.pause_listener.stop()
+        if self.repaste_listener is not None:
+            self.repaste_listener.stop()
         if self.api is not None:
             self.api.stop()  # before the worker, so no request is left orphaned
         try:
@@ -1417,6 +1433,37 @@ class PyWhisprApp(QObject):
         log.info("Re-inserting a remembered transcript (%d characters)", len(chosen))
         QTimer.singleShot(FOCUS_RESTORE_MS, lambda: self.injector.insert(chosen))
 
+    def _on_repaste(self) -> None:
+        """Paste the newest remembered transcript at the caret, no picker.
+
+        The everyday case of recall: the dictation just went nowhere because the
+        caret was not where the user thought, so they click into the right box and
+        press this. The focus is already where it should be — nothing to restore.
+        """
+        if self.state != State.IDLE or QApplication.activeModalWidget() is not None:
+            # A modal is the history picker or the settings page: pasting into
+            # our own window helps nobody.
+            log.debug("Repaste ignored: %s", self.state.name)
+            return
+        last = next(iter(self._history), None)
+        if last is None:
+            self.tray.notify("Nothing to paste", "No dictations in this session yet.")
+            return
+        self._context.invalidate()
+        self._set_state(State.INSERTING)
+        self._last_inserted = last
+        log.info("Repasting the last transcript (%d characters)", len(last))
+        self._paste_when_released(last, RELEASE_WAIT_MS // RELEASE_POLL_MS)
+
+    def _paste_when_released(self, text: str, tries: int) -> None:
+        held = QGuiApplication.queryKeyboardModifiers() != Qt.KeyboardModifier.NoModifier
+        if held and tries > 0:
+            QTimer.singleShot(
+                RELEASE_POLL_MS, self, lambda: self._paste_when_released(text, tries - 1)
+            )
+            return
+        self.injector.insert(text)
+
     def _resume_listeners(self) -> None:
         """Re-arm the hotkey after a dialog that had to silence it.
 
@@ -1500,6 +1547,10 @@ class PyWhisprApp(QObject):
             self._register_side_hotkey("reset_listener", new.reset_hotkey, self._reset_requested)
         if new.pause_hotkey != old.pause_hotkey:
             self._register_side_hotkey("pause_listener", new.pause_hotkey, self._pause_requested)
+        if new.repaste_hotkey != old.repaste_hotkey:
+            self._register_side_hotkey(
+                "repaste_listener", new.repaste_hotkey, self._repaste_requested
+            )
         self._fillers = filler_words(new.extra_filler_words, new.keep_filler_words)
         self._reset_phrases = compile_reset_phrases(new.voice_reset_phrases)
         # Restore first: a ducker thrown away while holding saved levels never
@@ -1546,7 +1597,7 @@ class PyWhisprApp(QObject):
             self._resume_listeners()
 
     def _side_listener(self, chord: str, emit):
-        """A start-over/pause listener, or None when unset or clashing with dictation."""
+        """A start-over/pause/repaste listener, or None when unset or clashing with dictation."""
         if not chord or chord == self.cfg.hotkey:
             return None
         return create_hotkey_listener(chord, on_toggle=emit)

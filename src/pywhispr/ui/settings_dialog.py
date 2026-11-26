@@ -49,6 +49,7 @@ EDITED_FIELDS = (
     "hotkey",
     "reset_hotkey",
     "pause_hotkey",
+    "repaste_hotkey",
     "input_device",
     "input_device_name",
     "max_recording_seconds",
@@ -151,6 +152,12 @@ class SettingsDialog(QDialog):
         form.addRow(
             "Pause hotkey",
             self._with_button(self._pause_hotkey_label, "Change…", self._change_pause_hotkey),
+        )
+
+        self._repaste_hotkey_label = QLabel(self.config.repaste_hotkey or "off")
+        form.addRow(
+            "Paste-again hotkey",
+            self._with_button(self._repaste_hotkey_label, "Change…", self._change_repaste_hotkey),
         )
 
         self._mic = QComboBox()
@@ -455,6 +462,14 @@ class SettingsDialog(QDialog):
         if chord:
             self.config.pause_hotkey = chord
             self._pause_hotkey_label.setText(chord)
+
+    def _change_repaste_hotkey(self) -> None:
+        if self._on_change_reset_hotkey is None:  # same capture dialog
+            return
+        chord = self._on_change_reset_hotkey(self.config.repaste_hotkey)
+        if chord:
+            self.config.repaste_hotkey = chord
+            self._repaste_hotkey_label.setText(chord)
 
     def _gpu_is_active(self) -> bool:
         """Anything unanswerable counts as off — same reasoning as the tray's old
